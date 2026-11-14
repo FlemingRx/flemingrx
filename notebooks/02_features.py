@@ -17,7 +17,8 @@
 # MAGIC ### The one rule that matters most: no data leakage
 # MAGIC A feature must never contain information from after the culture was ordered (for example,
 # MAGIC which organism grew). If it does, the model looks brilliant in testing and is useless in real
-# MAGIC life. Every history feature below only uses events **at least 1 day before** the culture.
+# MAGIC life. Every history feature below only uses events **at least 1 day before** the culture
+# MAGIC (3 days for past lab results, which take that long to come back).
 # MAGIC
 # MAGIC **Input:** the `bronze_*` tables from notebook 01.
 # MAGIC **Output:** `workspace.armd.gold_urine_features`.
@@ -109,10 +110,12 @@ display(orders.groupBy("split").count().orderBy("split"))
 # MAGIC %md
 # MAGIC ## 3. Build the labels: was the infection resistant to each antibiotic?
 # MAGIC
-# MAGIC We use the **implied susceptibility** table. It has the lab's result for each organism and
-# MAGIC antibiotic, plus results the lab didn't report but that follow from standard rules (for
-# MAGIC example, an organism that is naturally resistant to a drug). We take the lab's result when there
-# MAGIC is one, otherwise the implied one.
+# MAGIC Results come from two tables, and we need both:
+# MAGIC - **cohort**: the results the lab actually reported.
+# MAGIC - **implied susceptibility**: extra results the lab didn't report but that follow from standard
+# MAGIC   rules (for example, an organism that is naturally resistant to a drug). This table is *not* a
+# MAGIC   full copy of the lab results: it has only ~8,000 trimethoprim/sulfamethoxazole rows where the
+# MAGIC   cohort has ~103,000, so using it alone would almost wipe out that drug.
 # MAGIC
 # MAGIC Some cultures grow more than one organism. The drug only works if it works on **all** of them,
 # MAGIC so the culture counts as resistant if **any** organism was resistant.
@@ -124,16 +127,26 @@ abx_lookup = spark.createDataFrame(
     ["abx_lower", "antibiotic", "antibiotic_slug", "spectrum_rank"],
 )
 
-result = F.lower(F.trim(F.coalesce(F.col("susceptibility"), F.col("implied_susceptibility"))))
+lab_results = spark.table(tbl("bronze_cohort")).select(
+    "order_proc_id_coded",
+    "organism",
+    F.lower(F.trim("antibiotic")).alias("abx_lower"),
+    F.lower(F.trim("susceptibility")).alias("result"),
+)
+implied_results = spark.table(tbl("bronze_implied_susceptibility")).select(
+    "order_proc_id_coded",
+    "organism",
+    F.lower(F.trim("antibiotic")).alias("abx_lower"),
+    F.lower(F.trim(F.coalesce("susceptibility", "implied_susceptibility"))).alias("result"),
+)
 
 labels = (
-    spark.table(tbl("bronze_implied_susceptibility"))
-    .withColumn("abx_lower", F.lower(F.trim("antibiotic")))
+    lab_results.unionByName(implied_results)
     .join(F.broadcast(abx_lookup.select("abx_lower")), "abx_lower")         # keep target drugs only
     .join(orders.select("order_proc_id_coded"), "order_proc_id_coded")      # keep our cultures only
     .withColumn(
         "resistant",
-        F.when(result.isin(NOT_SUSCEPTIBLE), 1).when(result.isin(SUSCEPTIBLE), 0),
+        F.when(F.col("result").isin(NOT_SUSCEPTIBLE), 1).when(F.col("result").isin(SUSCEPTIBLE), 0),
     )
     .where(F.col("resistant").isNotNull())
     .groupBy("order_proc_id_coded", "abx_lower")
@@ -203,6 +216,8 @@ labs = (
     spark.table(tbl("bronze_labs"))
     .groupBy("order_proc_id_coded")
     .agg(*[F.max(F.col(f"median_{x}").cast("double")).alias(f"lab_{x}") for x in LAB_MEDIANS])
+    # hemoglobin is stored at 1000x the usual g/dL value (median 12000 -> 12.0 g/dL)
+    .withColumn("lab_hgb", F.col("lab_hgb") / 1000)
 )
 
 vitals = (
@@ -219,19 +234,16 @@ vitals = (
 # MAGIC = 1` means the patient took a fluoroquinolone in the 90 days before the culture.
 # MAGIC
 # MAGIC **Leakage guard:** every flag only counts events at least 1 day before the culture
-# MAGIC (`min_days=1`).
+# MAGIC (`min_days=1`). Past *resistance* needs 3 days, because lab results take that long to come back.
 
 # COMMAND ----------
 
-def history_flags(table, value_col, day_col, values, prefix, max_days, min_days=1, lower=False,
-                  suffix=""):
+def history_flags(table, value_col, day_col, values, prefix, max_days, min_days=1, suffix=""):
     """One 0/1 column per value: did this event happen between min_days and max_days before the culture?"""
     df = spark.table(tbl(table)).withColumn("_days", days(day_col))
     df = df.where((F.col("_days") >= min_days) & (F.col("_days") <= max_days))
-    value = F.lower(F.trim(F.col(value_col))) if lower else F.col(value_col)
     return df.groupBy("order_proc_id_coded").agg(*[
-        F.max(F.when(value == (v.lower() if lower else v), 1).otherwise(0))
-        .alias(f"{prefix}_{slug(v)}{suffix}")
+        F.max(F.when(F.col(value_col) == v, 1).otherwise(0)).alias(f"{prefix}_{slug(v)}{suffix}")
         for v in values
     ])
 
@@ -269,16 +281,41 @@ prior_organisms = history_flags("bronze_prior_infecting_organism", "prior_organi
                                 "prior_infecting_organism_days_to_culture", PRIOR_ORGANISMS,
                                 "prior_org", HISTORY_DAYS)
 
-# Earlier resistance to each target antibiotic (last year) - usually the strongest signal
-prior_resistance = history_flags("bronze_microbial_resistance", "antibiotic",
-                                 "resistant_time_to_culturetime", TARGET_ANTIBIOTICS,
-                                 "prior_resist", HISTORY_DAYS, lower=True)
-prior_resistance_count = (
-    spark.table(tbl("bronze_microbial_resistance"))
-    .withColumn("_days", days("resistant_time_to_culturetime"))
-    .where((F.col("_days") >= 1) & (F.col("_days") <= HISTORY_DAYS))
+# Earlier resistance to each target antibiotic (last year) - usually the strongest signal.
+# The dataset's own resistance-history table skips trimethoprim/sulfamethoxazole and
+# piperacillin/tazobactam, so we work it out from the patient's earlier cultures instead.
+# An earlier culture only counts if it was ordered at least PRIOR_RESULT_MIN_DAYS before: its
+# susceptibility results take ~2-3 days, so a doctor couldn't have seen anything newer.
+PRIOR_RESULT_MIN_DAYS = 3
+
+
+def order_timestamp(col_name):
+    # "2023-12-23 22:29:00+00:00" -> timestamp (the first 19 characters are the date and time)
+    return F.to_timestamp(F.substring(col_name, 1, 19))
+
+
+past_resistant_results = (
+    spark.table(tbl("bronze_cohort"))
+    .where(F.lower(F.trim("susceptibility")).isin(NOT_SUSCEPTIBLE))
+    .select(
+        "anon_id",
+        order_timestamp("order_time_jittered_utc").alias("past_time"),
+        F.lower(F.trim("antibiotic")).alias("past_abx"),
+    )
+    .distinct()
+)
+
+prior_resistance = (
+    orders.select("order_proc_id_coded", "anon_id", order_timestamp("order_time").alias("order_ts"))
+    .join(past_resistant_results, "anon_id")
+    .withColumn("_days", F.datediff("order_ts", "past_time"))
+    .where((F.col("_days") >= PRIOR_RESULT_MIN_DAYS) & (F.col("_days") <= HISTORY_DAYS))
     .groupBy("order_proc_id_coded")
-    .agg(F.countDistinct(F.lower("antibiotic")).alias("n_prior_resistant_drugs"))
+    .agg(
+        *[F.max(F.when(F.col("past_abx") == name.lower(), 1).otherwise(0)).alias(f"prior_resist_{slug(name)}")
+          for name in TARGET_ANTIBIOTICS],
+        F.countDistinct("past_abx").alias("n_prior_resistant_drugs"),
+    )
 )
 
 # Procedures in the last 90 days (catheters matter a lot for urinary infections)
@@ -306,7 +343,7 @@ nursing_home = (
 # COMMAND ----------
 
 feature_tables = [demographics, ward, adi, labs, vitals, abx_exposure, abx_recency,
-                  prior_organisms, prior_resistance, prior_resistance_count, procedures, nursing_home]
+                  prior_organisms, prior_resistance, procedures, nursing_home]
 
 order_features = reduce(
     lambda acc, df: acc.join(df, "order_proc_id_coded", "left"),
@@ -317,8 +354,12 @@ order_features = reduce(
 zero_fill = [c for c in order_features.columns
              if c.startswith(("abx_class_", "prior_org_", "prior_resist_", "proc_"))
              or c in ("nursing_home", "n_prior_resistant_drugs")]
-order_features = order_features.fillna(0, subset=zero_fill)
-order_features = order_features.fillna(HISTORY_DAYS + 1, subset=["days_since_last_antibiotic"])
+order_features = order_features.select(*[
+    F.coalesce(F.col(c), F.lit(0)).alias(c) if c in zero_fill
+    else F.coalesce(F.col(c), F.lit(HISTORY_DAYS + 1)).alias(c) if c == "days_since_last_antibiotic"
+    else F.col(c)
+    for c in order_features.columns
+])
 
 same_drug = reduce(
     lambda acc, name: acc.when(F.col("antibiotic_slug") == slug(name), F.col(f"prior_resist_{slug(name)}")),
