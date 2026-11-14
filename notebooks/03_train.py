@@ -388,6 +388,7 @@ print(f"Registered {MODEL_NAME}")
 # MAGIC %md
 # MAGIC ## 9. Check the registered model works
 # MAGIC Load it back from Unity Catalog exactly as the demo app will, and score three test patients.
+# MAGIC Whatever calls the model must send every feature as a decimal number (float64).
 
 # COMMAND ----------
 
@@ -395,6 +396,8 @@ from mlflow import MlflowClient
 
 latest = max(int(v.version) for v in MlflowClient().search_model_versions(f"name='{MODEL_NAME}'"))
 loaded = mlflow.pyfunc.load_model(f"models:/{MODEL_NAME}/{latest}")
-sample = pdf[is_test][FEATURES].head(3)
+# the model expects every feature as a decimal number (float64), as in training; MLflow rejects
+# whole-number columns like age_min = 75 instead of 75.0, so convert first
+sample = pdf[is_test][FEATURES].astype("float64").head(3)
 display(loaded.predict(sample).round(3))
 print(f"Loaded {MODEL_NAME} version {latest}")
