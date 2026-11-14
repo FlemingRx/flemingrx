@@ -56,3 +56,8 @@ Thumbs.db
 # ===== Logs =====
 *.log
 logs/
+# raw data: never commit (multi-GB, lives in Databricks volumes)
+*.csv
+*.zip
+*.parquet
+data/

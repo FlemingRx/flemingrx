@@ -1,0 +1,2 @@
+# For running the Databricks notebooks locally with local/run_notebook.py (no Spark or Java needed)
+sqlframe[duckdb]>=4.10
