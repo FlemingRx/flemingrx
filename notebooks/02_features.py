@@ -400,10 +400,10 @@ print(f"OK: {total:,} rows, each a unique (culture, antibiotic) pair")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC **b) Resistance rates by antibiotic and split.** When we profiled the raw data, urine resistance
-# MAGIC was roughly: nitrofurantoin 20%, trimethoprim/sulfamethoxazole 24%, cefazolin 18%,
-# MAGIC ciprofloxacin 20%, ceftriaxone 11%, piperacillin/tazobactam 4%, meropenem under 1%. Numbers here
-# MAGIC will differ a bit (implied results are included), but a value far off means something is wrong.
+# MAGIC **b) Resistance rates by antibiotic and split.** A full run of this notebook gave these overall
+# MAGIC rates: nitrofurantoin ~21%, trimethoprim/sulfamethoxazole ~25%, cefazolin ~21%,
+# MAGIC ciprofloxacin ~21%, ceftriaxone ~15%, piperacillin/tazobactam ~4.5%, meropenem ~0.5%. Each
+# MAGIC drug should be within a point or two of these; a value far off means something is wrong.
 # MAGIC
 # MAGIC The test years may be a little higher or lower than training. That drift over time is real
 # MAGIC and is exactly why we test on later years.
