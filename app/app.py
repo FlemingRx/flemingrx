@@ -212,14 +212,7 @@ def recommendation_panel(model, features, patient):
     risks = list(predictions.to_numpy())
 
     with st.container(key="results"):
-        with st.container(border=True, key="card_target"):
-            target = st.slider(
-                "Required chance of working", 80, 99,
-                int(round(100 * float(os.getenv("TARGET_SUCCESS", "0.90")))), format="%d%%",
-                key="target_pct",
-                help="The rule recommends the narrowest antibiotic that is at least this likely "
-                     "to work. Higher is safer for this patient but leads to more broad-spectrum use.",
-            ) / 100
+        target = 90 / 100
 
         picked = policy.recommend(risks, target)
         st.html(hero_html(policy.drug_label(drugs[picked]), 1 - risks[picked],

@@ -115,7 +115,7 @@ def render(clinician: dict):
     with middle:
         st.html(_card("warning", "red", "Requires attention", len(ATTENTION), "".join(
             _row(case, what, _status(level, LEVEL_CLASS[level])) for case, what, level in ATTENTION)))
-        st.html('<div class="fx-dcard fx-blank"></div>')
+        # st.html('<div class="fx-dcard fx-blank"></div>')
 
     with right:
         st.html(_card("monitor_heart", "navy", "Recent activity", len(ACTIVITY), "".join(
