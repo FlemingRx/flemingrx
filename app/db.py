@@ -7,6 +7,8 @@ The tables:
   prescriptions       what the model recommended for a patient and what the clinician prescribed
   cultures            one row per urine culture: what grew, and the clinician's review of the result
   susceptibilities    one row per culture and antibiotic tested: susceptible, intermediate or resistant
+  follow_ups          one row per patient being followed after a prescription: why, what has been
+                      documented since, and the clinician's reassessment
 
 Where the database lives:
   Databricks Lakebase (Postgres), by default, both deployed and on a laptop. There is no stored
@@ -104,7 +106,45 @@ susceptibilities = sa.Table(
     sa.Column("result", sa.String(16), nullable=False),            # one of RESULTS
 )
 
+# One row per patient in the follow-up queue. The first block says why they are in it and where
+# that came from (a culture or a documented encounter). The second holds what was documented after
+# the prescription; in a hospital it would be imported from the record. The third is the
+# clinician's reassessment, empty until they save one. `status` is where the row sits in the queue.
+follow_ups = sa.Table(
+    "follow_ups", metadata,
+    sa.Column("id", sa.Integer, primary_key=True),
+    sa.Column("patient_id", sa.ForeignKey("patients.id", ondelete="CASCADE"), nullable=False,
+              unique=True),
+    sa.Column("prescription_id", sa.ForeignKey("prescriptions.id", ondelete="CASCADE"),
+              nullable=False),
+    sa.Column("reason", sa.String(64), nullable=False),            # one of FOLLOW_UP_REASONS
+    sa.Column("reason_detail", sa.Text, nullable=False),
+    sa.Column("source", sa.String(120), nullable=False),           # the culture or encounter
+    sa.Column("reported_on", sa.Date, nullable=False),
+    sa.Column("status", sa.String(32), nullable=False),            # one of FOLLOW_UP_STATUSES
+    sa.Column("updated_at", sa.DateTime, nullable=False),
+
+    sa.Column("symptom_progression", sa.String(64)),
+    sa.Column("treatment_adherence", sa.String(64)),
+    sa.Column("adverse_reaction", sa.String(255)),                 # empty = none reported
+    sa.Column("additional_notes", sa.Text),
+
+    sa.Column("decision", sa.String(64)),                          # one of FOLLOW_UP_DECISIONS
+    sa.Column("decision_notes", sa.Text),
+    sa.Column("decided_by", sa.ForeignKey("clinicians.id")),
+    sa.Column("decided_at", sa.DateTime),
+)
+
 RESULTS = ("Susceptible", "Intermediate", "Resistant")
+FOLLOW_UP_REASONS = ("Culture resistance mismatch", "Symptoms worsening or not improving",
+                     "Adverse drug reaction", "Treatment completion", "Other clinical concern",
+                     "Follow-up pending")
+FOLLOW_UP_STATUSES = ("Needs reassessment", "Awaiting follow-up", "Resolved")
+FOLLOW_UP_DECISIONS = ("Continue current treatment", "Modify treatment",
+                       "Escalate for further evaluation", "Other / additional monitoring")
+# What the clinician picks when saving a reassessment, and the queue status it leads to.
+FOLLOW_UP_OUTCOMES = {"Resolved": "Resolved", "Further monitoring required": "Awaiting follow-up",
+                      "Reassessment pending": "Needs reassessment"}
 REVIEW_DECISIONS = ("Compatible", "Reassessment needed", "Other")
 
 
@@ -202,6 +242,8 @@ def init(url: str | None = None) -> None:
             seed.load(connection)
         if empty(cultures):       # added after the first databases were filled, so checked by itself
             seed.load_cultures(connection)
+        if empty(follow_ups):     # likewise
+            seed.load_follow_ups(connection)
 
 
 # ----------------------------------------------------------------------------- passwords
@@ -342,3 +384,66 @@ def prescription_result(case: dict) -> str | None:
     """The lab's result for the drug the patient is on, or None if it wasn't tested or isn't back."""
     course = case.get("prescription")
     return case["susceptibilities"].get(course["drug"]) if course else None
+
+
+# ----------------------------------------------------------------------------- follow-up
+
+def _follow_ups(connection, clinician_id: int, patient_number: str | None = None) -> list[dict]:
+    """Follow-ups for this clinician's patients, each with its patient number and prescription."""
+    query = (sa.select(follow_ups, patients.c.patient_number)
+             .join(patients, patients.c.id == follow_ups.c.patient_id)
+             .join(clinician_patients, clinician_patients.c.patient_id == patients.c.id)
+             .where(clinician_patients.c.clinician_id == clinician_id)
+             .order_by(follow_ups.c.updated_at.desc(), patients.c.patient_number))
+    if patient_number:
+        query = query.where(patients.c.patient_number == patient_number)
+    rows = [dict(row) for row in connection.execute(query).mappings()]
+    if rows:
+        courses = connection.execute(sa.select(prescriptions).where(
+            prescriptions.c.id.in_([row["prescription_id"] for row in rows]))).mappings().all()
+        by_id = {course["id"]: dict(course) for course in courses}
+        for row in rows:
+            row["prescription"] = by_id[row["prescription_id"]]
+    return rows
+
+
+def follow_ups_for(clinician_id: int, url: str | None = None) -> list[dict]:
+    """The follow-up queue for this clinician's patients, most recently updated first."""
+    with engine(url).connect() as connection:
+        return _follow_ups(connection, clinician_id)
+
+
+def follow_up_for(clinician_id: int, patient_number: str, url: str | None = None) -> dict | None:
+    """One patient's follow-up with their record and latest culture, if they are this clinician's."""
+    with engine(url).connect() as connection:
+        rows = _follow_ups(connection, clinician_id, patient_number)
+        if not rows:
+            return None
+        row = rows[0]
+        row["patient"] = dict(connection.execute(
+            sa.select(patients).where(patients.c.id == row["patient_id"])).mappings().one())
+        cases = [case for case in _cases(connection, clinician_id)        # newest first
+                 if case["patient_id"] == row["patient_id"]]
+        row["culture"] = cases[0] if cases else None
+        if row["decided_by"]:
+            row["decider"] = connection.execute(
+                sa.select(clinicians.c.name).where(clinicians.c.id == row["decided_by"])).scalar()
+    return row
+
+
+def save_reassessment(clinician_id: int, patient_number: str, decision: str, notes: str,
+                      outcome: str, url: str | None = None) -> bool:
+    """Record the clinician's reassessment and move the follow-up in the queue. False if not theirs."""
+    if decision not in FOLLOW_UP_DECISIONS:
+        raise ValueError(f"Unknown clinical decision: {decision}")
+    if outcome not in FOLLOW_UP_OUTCOMES:
+        raise ValueError(f"Unknown follow-up status: {outcome}")
+    now = datetime.datetime.now()
+    with engine(url).begin() as connection:
+        rows = _follow_ups(connection, clinician_id, patient_number)
+        if not rows:
+            return False
+        connection.execute(follow_ups.update().where(follow_ups.c.id == rows[0]["id"]).values(
+            decision=decision, decision_notes=notes.strip(), decided_by=clinician_id, decided_at=now,
+            status=FOLLOW_UP_OUTCOMES[outcome], updated_at=now))
+    return True

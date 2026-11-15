@@ -61,9 +61,17 @@ def case_list(clinician: dict):
     if not cases:
         st.info("There are no cultures for your patients yet.", icon=":material/info:")
         return
+    search = st.text_input("Search culture or patient ID", icon=":material/search:",
+                           placeholder="Search culture or patient ID...",
+                           label_visibility="collapsed", key="culture_search", width=280)
+    wanted = search.strip().lower()
+    shown = [case for case in cases if wanted in case["culture_number"].lower()
+             or wanted in case["patient_number"].lower()]
+    if not shown:
+        st.caption("No cultures match.")
     order = list(STATUSES)
     with st.container(key="caselist"):
-        for case in sorted(cases, key=lambda case: order.index(status[case["culture_number"]])):
+        for case in sorted(shown, key=lambda case: order.index(status[case["culture_number"]])):
             number, state = case["culture_number"], status[case["culture_number"]]
             about = " · ".join([case["patient_number"], case["organism"] or "Result awaited",
                                 f"collected {day(case['collected_on'])}"])

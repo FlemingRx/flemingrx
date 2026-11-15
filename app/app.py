@@ -2,7 +2,7 @@
 
 This file is the frame around every screen (sign-in, sidebar, top bar, footer) and holds the
 clinical assessment: the signed-in clinician's patients, and for each one a recommended antibiotic.
-The dashboard is in dashboard.py, culture results in culture_results.py, the database in db.py. Screens that are planned but not built
+The dashboard is in dashboard.py, culture results in culture_results.py, follow-up in follow_up.py, the database in db.py. Screens that are planned but not built
 yet are listed in PLANNED below.
 
 Run locally with `streamlit run app.py` from this folder (see README.md for the two settings a
@@ -23,6 +23,7 @@ import streamlit as st
 
 import culture_results
 import dashboard
+import follow_up
 import data
 import db
 import policy
@@ -99,8 +100,14 @@ def patient_list(clinician: dict):
     if not records:
         st.info("No patients are assigned to you yet.", icon=":material/info:")
         return
+    search = st.text_input("Search patient ID", placeholder="Search patient ID...",
+                           icon=":material/search:", label_visibility="collapsed",
+                           key="patient_search", width=280)
+    shown = [r for r in records if search.strip().lower() in r["patient_number"].lower()]
+    if not shown:
+        st.caption("No patients match.")
     with st.container(key="patientlist"):
-        for record in records:
+        for record in shown:
             number = record["patient_number"]
             if st.button(f"**{number}** :gray[{patient_summary(record)}]", key=f"open_{number}",
                          icon=":material/chevron_right:", width="stretch"):
@@ -324,9 +331,6 @@ PLANNED = [
     ("Patient Encounters", "patients", "group",
      "Each patient's wider history in one place: allergies, current medicines, kidney and liver "
      "function, earlier infections and past culture results."),
-    ("Follow-up", "follow-up", "event_repeat",
-     "What happens after treatment starts: response, side effects, reassessment reminders and "
-     "treatment completion."),
     ("Stewardship Analytics", "analytics", "bar_chart",
      "Prescribing across the service: broad versus narrow use, recommendations accepted or "
      "overridden, and resistance trends."),
@@ -366,11 +370,15 @@ planned = [st.Page(planned_page(icon, title, body), title=title, url_path=path,
                    icon=f":material/{icon}:") for title, path, icon, body in PLANNED]
 cultures = st.Page(lambda: culture_results.render(clinician), title="Culture Results",
                    url_path="cultures", icon=":material/biotech:")
-current = st.navigation({"Workspace": [home, assessment, cultures], "Coming next": planned})
+follow = st.Page(lambda: follow_up.render(clinician), title="Follow-up", url_path="follow-up",
+                 icon=":material/event_repeat:")
+current = st.navigation({"Workspace": [home, assessment, cultures, follow], "Coming next": planned})
 if current is not assessment:      # coming back to a screen starts at its list
     st.session_state.pop("patient", None)
 if current is not cultures:
     st.session_state.pop("culture", None)
+if current is not follow:
+    st.session_state.pop("follow_up", None)
 
 st.logo(str(LOGO_LIGHT), size="large", icon_image=str(MARK))
 with st.sidebar:
@@ -381,7 +389,7 @@ with st.sidebar:
         st.rerun()
     st.html('<div class="fx-sidenote"><b>Research demo</b>Fabricated patients. '
             'Not for clinical use.</div>')
-top_bar(current.title, sample_data=current in (home, assessment, cultures))
+top_bar(current.title, sample_data=current in (home, assessment, cultures, follow))
 
 current.run()
 

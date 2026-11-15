@@ -158,3 +158,55 @@ def test_seed_cases_use_known_patients_drugs_and_results():
     for case in seed.CASES:
         assert case[2] in seed.REGIMENS and case[3] in seed.REGIMENS
         assert case[9] is None or (len(case[9]) == len(seed.PANEL) and set(case[9]) <= set("SIR"))
+
+
+def test_follow_up_queue_is_limited_to_the_clinicians_patients(url):
+    for person in seed.CLINICIANS:
+        clinician = db.sign_in(person["username"], person["password"], url)
+        mine = {p["patient_number"] for p in db.patients_for(clinician["id"], url)}
+        rows = db.follow_ups_for(clinician["id"], url)
+        assert {row["patient_number"] for row in rows} == mine and len(rows) == len(mine)
+        assert all(row["status"] in db.FOLLOW_UP_STATUSES and row["reason"] in db.FOLLOW_UP_REASONS
+                   for row in rows)
+
+    okafor = db.sign_in("jokafor", password_of("jokafor"), url)
+    assert db.follow_up_for(okafor["id"], "PT-00391", url) is None         # Mitchell's patient
+    assert db.save_reassessment(okafor["id"], "PT-00391", "Modify treatment", "",
+                                "Resolved", url) is False
+
+
+def test_follow_up_carries_the_prescription_and_latest_culture(url):
+    mitchell = db.sign_in("sarahmitchell", password_of("sarahmitchell"), url)
+    row = db.follow_up_for(mitchell["id"], "PT-00391", url)
+    assert row["reason"] == "Culture resistance mismatch" and row["status"] == "Needs reassessment"
+    assert row["prescription"]["drug"] == "ciprofloxacin" and row["patient"]["age_band"] == "75-84"
+    assert row["culture"]["culture_number"] == "CX-2193"
+    assert db.prescription_result({**row["culture"], "prescription": row["prescription"]}) == "Resistant"
+
+    statuses = [r["status"] for r in db.follow_ups_for(mitchell["id"], url)]
+    assert {s: statuses.count(s) for s in db.FOLLOW_UP_STATUSES} == {
+        "Needs reassessment": 4, "Awaiting follow-up": 3, "Resolved": 1}
+
+
+def test_saving_a_reassessment_moves_the_follow_up(url):
+    mitchell = db.sign_in("sarahmitchell", password_of("sarahmitchell"), url)
+    with pytest.raises(ValueError):
+        db.save_reassessment(mitchell["id"], "PT-00391", "Do nothing", "", "Resolved", url)
+    with pytest.raises(ValueError):
+        db.save_reassessment(mitchell["id"], "PT-00391", "Modify treatment", "", "Done", url)
+
+    assert db.save_reassessment(mitchell["id"], "PT-00391", "Modify treatment", " Switched. ",
+                                "Further monitoring required", url)
+    row = db.follow_up_for(mitchell["id"], "PT-00391", url)
+    assert (row["status"], row["decision"], row["decision_notes"]) == (
+        "Awaiting follow-up", "Modify treatment", "Switched.")
+    assert row["decider"] == "Dr. Sarah Mitchell"
+    assert db.follow_ups_for(mitchell["id"], url)[0]["patient_number"] == "PT-00391"   # newest first
+
+
+def test_seed_follow_ups_use_known_patients_and_values():
+    numbers = {patient["row"]["patient_number"] for patient in seed.PATIENTS}
+    assert {row[0] for row in seed.FOLLOW_UPS} == numbers          # one follow-up per patient
+    for row in seed.FOLLOW_UPS:
+        assert row[1] in db.FOLLOW_UP_REASONS and row[5] in db.FOLLOW_UP_STATUSES
+        assert row[10] is None or row[10][0] in db.FOLLOW_UP_DECISIONS

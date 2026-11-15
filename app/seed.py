@@ -1,5 +1,5 @@
-"""Fabricated demo data: three clinicians, their patients, and each patient's prescription and
-urine culture.
+"""Fabricated demo data: three clinicians, their patients, and each patient's prescription, urine
+culture and follow-up.
 
 NONE OF THIS IS REAL. The clinicians and patients are made up for the hackathon demo, and the
 passwords below are demo passwords, here so anyone running the demo can sign in. Do not reuse
@@ -183,8 +183,100 @@ def load_cultures(connection) -> None:
             resulted_on=collected + datetime.timedelta(days=2) if organism else None,
             organism=organism, colony_count=colonies, review_decision=decision, review_notes=notes,
             reviewed_by=clinician_ids.get(reviewer),
-            reviewed_at=datetime.datetime.combine(today, datetime.time(9, 0)) if review else None))
+            reviewed_at=min(datetime.datetime.combine(today, datetime.time(9, 0)),
+                            datetime.datetime.now()) if review else None))
         for antibiotic, letter in zip(PANEL, panel or ""):
             connection.execute(db.susceptibilities.insert().values(
                 culture_id=result.inserted_primary_key[0], antibiotic=antibiotic,
                 result=_RESULT[letter]))
+
+
+# One follow-up per patient:
+# (patient, reason, why, where that came from, days since it was reported, queue status,
+#  symptom progression, treatment adherence, adverse reaction, additional notes, reassessment)
+# None means not documented yet. `reassessment` is (decision, notes, clinician) or None.
+TAKING = "Taking medication as prescribed"
+FOLLOW_UPS = [
+    ("PT-00391", "Culture resistance mismatch",
+     "Culture results show resistance to the prescribed antibiotic (ciprofloxacin).",
+     "Urine culture CX-2193", 1, "Needs reassessment",
+     "Not improving", TAKING, None, "Persistent dysuria and low-grade fever.", None),
+    ("PT-00408", "Culture resistance mismatch",
+     "Culture results show resistance to the prescribed antibiotic (trimethoprim/sulfamethoxazole).",
+     "Urine culture CX-2194", 1, "Needs reassessment",
+     "Unchanged", TAKING, None, None, None),
+    ("PT-00415", "Culture resistance mismatch",
+     "Culture results show resistance to the prescribed antibiotic (ceftriaxone).",
+     "Urine culture CX-2201", 0, "Needs reassessment",
+     "Not improving", TAKING, None, "Remains febrile in the emergency department.", None),
+    ("PT-00401", "Adverse drug reaction",
+     "Patient experienced a documented adverse reaction after starting treatment.",
+     "Reported during a subsequent clinical encounter", 1, "Needs reassessment",
+     "Improving", TAKING, "Maculopapular rash on the trunk, day 2 of piperacillin/tazobactam",
+     "No airway or mucosal involvement documented.", None),
+    ("PT-00412", "Symptoms worsening or not improving",
+     "Patient has documented persistent urinary symptoms and fever following initiation of "
+     "antibiotic treatment.",
+     "Reported during a subsequent clinical encounter", 0, "Needs reassessment",
+     "Worsening", TAKING, None, "Temperature 38.6 C at 48 hours.", None),
+    ("PT-00403", "Other clinical concern",
+     "Urinary catheter has been in place throughout treatment and is due for review.",
+     "Reported during a subsequent clinical encounter", 1, "Needs reassessment",
+     "Improving", TAKING, None, "Catheter change not yet documented.", None),
+    ("PT-00377", "Follow-up pending",
+     "Treatment started; no follow-up information has been documented yet.",
+     "Original assessment", 1, "Awaiting follow-up", None, None, None, None, None),
+    ("PT-00389", "Follow-up pending",
+     "Treatment started; no follow-up information has been documented yet.",
+     "Original assessment", 2, "Awaiting follow-up", None, None, None, None, None),
+    ("PT-00399", "Follow-up pending",
+     "Treatment started; no follow-up information has been documented yet.",
+     "Original assessment", 2, "Awaiting follow-up", None, None, None, None, None),
+    ("PT-00409", "Follow-up pending",
+     "Treatment started; no follow-up information has been documented yet.",
+     "Original assessment", 1, "Awaiting follow-up", None, None, None, None, None),
+    ("PT-00421", "Follow-up pending",
+     "Treatment started; no follow-up information has been documented yet.",
+     "Original assessment", 2, "Awaiting follow-up", None, None, None, None, None),
+    ("PT-00410", "Treatment completion",
+     "Patient has completed treatment and requires an outcome assessment.",
+     "Reported during a subsequent clinical encounter", 0, "Resolved",
+     "Resolved", "Completed the full course", None, "No urinary symptoms at review.",
+     ("Continue current treatment", "Course completed; symptoms resolved. No further action.",
+      "sarahmitchell")),
+    ("PT-00418", "Adverse drug reaction",
+     "Patient experienced a documented adverse reaction after starting treatment.",
+     "Reported during a subsequent clinical encounter", 2, "Resolved",
+     "Improving", TAKING, "Mild nausea with ciprofloxacin, settled when taken with food",
+     None,
+     ("Continue current treatment", "Nausea settled; continue the course.", "praman")),
+]
+
+
+def load_follow_ups(connection) -> None:
+    """Insert the follow-up for each patient in FOLLOW_UPS, tied to their prescription."""
+    today = datetime.date.today()
+    patient_ids = dict(connection.execute(
+        db.sa.select(db.patients.c.patient_number, db.patients.c.id)).all())
+    clinician_ids = dict(connection.execute(
+        db.sa.select(db.clinicians.c.username, db.clinicians.c.id)).all())
+    course_ids = dict(connection.execute(
+        db.sa.select(db.prescriptions.c.patient_id, db.prescriptions.c.id)
+        .order_by(db.prescriptions.c.started_on, db.prescriptions.c.id)).all())   # latest wins
+    for (patient, reason, detail, source, days_ago, status, symptoms, adherence, reaction, notes,
+         reassessment) in FOLLOW_UPS:
+        patient_id = patient_ids.get(patient)
+        if patient_id not in course_ids:
+            continue
+        reported = today - datetime.timedelta(days=days_ago)
+        # 09:30 on the day it was reported, but never later than now
+        updated = min(datetime.datetime.combine(reported, datetime.time(9, 30)),
+                      datetime.datetime.now())
+        decision, decision_notes, decider = reassessment or (None, None, None)
+        connection.execute(db.follow_ups.insert().values(
+            patient_id=patient_id, prescription_id=course_ids[patient_id], reason=reason,
+            reason_detail=detail, source=source, reported_on=reported, status=status,
+            updated_at=updated, symptom_progression=symptoms, treatment_adherence=adherence,
+            adverse_reaction=reaction, additional_notes=notes, decision=decision,
+            decision_notes=decision_notes, decided_by=clinician_ids.get(decider),
+            decided_at=updated if reassessment else None))

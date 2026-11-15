@@ -362,3 +362,41 @@ button[data-variant="pills"] { border-radius: 0 !important; }
 .fx-verdict-note { background: var(--fx-head); border-color: #c3cad8; } .fx-verdict-note b { color: var(--fx-navy); }
 .st-key-review_save button { background: var(--fx-navy); border-color: var(--fx-navy); }
 .st-key-review_save button:hover:not(:disabled) { background: var(--fx-teal); border-color: var(--fx-teal); }
+
+/* ---------- follow-up ---------- */
+.fx-tile .fx-tile-name { font-size: .88rem; font-weight: 700; color: var(--fx-ink); }
+.fx-state-blue { color: var(--fx-navy-2) !important; }
+.st-key-fu_controls { gap: .6rem !important; flex-wrap: wrap; }
+
+/* the queue is a table: a header row, then one full-width button per patient laid out on the same grid */
+.fx-qhead, .st-key-fu_rows button p { display: grid; align-items: center; column-gap: .9rem;
+  grid-template-columns: 6.5rem minmax(0, 1.2fr) minmax(0, 1.5fr) 6.5rem 9.5rem; }
+.fx-qhead { padding: .5rem 2.6rem .5rem .9rem; border-bottom: 1px solid var(--fx-line);
+  font-size: .7rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--fx-muted); }
+.st-key-fu_rows { gap: 0 !important; }
+.st-key-fu_rows button { background: #fff; border: 0; border-bottom: 1px solid var(--fx-line); padding: .65rem .9rem; }
+.st-key-fu_rows button:hover { background: var(--fx-teal-soft); color: var(--fx-ink); }
+.st-key-fu_rows button > div, .st-key-fu_rows button > div > span { width: 100%; }
+.st-key-fu_rows button > div > span { justify-content: space-between; flex-direction: row-reverse; }
+.st-key-fu_rows button [data-testid="stMarkdownContainer"] { flex: 1; min-width: 0; }
+.st-key-fu_rows button p { text-align: left; font-size: .84rem; }
+.st-key-fu_rows button p strong { color: var(--fx-navy); font-size: .9rem; font-variant-numeric: tabular-nums; }
+.st-key-fu_rows button p span:not(:last-of-type) { color: var(--fx-ink) !important; }
+.st-key-fu_rows button p span:nth-of-type(3) { color: var(--fx-muted) !important; }
+.st-key-fu_rows button p span:last-of-type { font-weight: 700; font-size: .78rem; }   /* keeps its status colour */
+@media (max-width: 760px) {
+  .fx-qhead { display: none; }
+  .st-key-fu_rows button p { grid-template-columns: 1fr 1fr; row-gap: .15rem; }
+}
+
+.fx-reason { display: flex; flex-direction: column; gap: .3rem; }
+.fx-reason b { font-size: .92rem; }
+.fx-reason p { margin: 0; font-size: .88rem; line-height: 1.5; color: var(--fx-ink); }
+.fx-reason small, .fx-summary small { font-size: .76rem; color: var(--fx-muted); }
+.fx-summary { display: flex; flex-direction: column; gap: .5rem; }
+.fx-summary > b { font-size: .8rem; }
+.fx-summary ul { margin: 0; padding-left: 1.1rem; font-size: .86rem; line-height: 1.6; color: var(--fx-ink); }
+.fx-next { border-top: 1px solid var(--fx-line); padding-top: .65rem; display: flex; flex-direction: column; gap: .2rem; }
+.fx-next p { margin: 0; font-size: .88rem; line-height: 1.5; color: var(--fx-ink); font-weight: 500; }
+.st-key-fu_save button { background: var(--fx-navy); border-color: var(--fx-navy); }
+.st-key-fu_save button:hover:not(:disabled) { background: var(--fx-teal); border-color: var(--fx-teal); }
