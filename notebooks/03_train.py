@@ -18,7 +18,9 @@
 # MAGIC resistance isn't the same as what predicts ceftriaxone resistance.
 # MAGIC
 # MAGIC **How the data is split (by date, never shuffled):**
-# MAGIC - **Step A, choose the approach:** train on 2008-2020, compare on **2021**.
+# MAGIC - **Step A, choose the approach:** train on 2008-2020, compare on **2021**. This is also where
+# MAGIC   gradient boosting's settings are tuned, and where we check that labs and the newer features
+# MAGIC   are worth keeping.
 # MAGIC - **Step B, final score:** retrain the chosen approach on 2008-2021 and score it once on
 # MAGIC   **2022 onwards**, the test years nobody has looked at. This is the number for the pitch.
 # MAGIC
@@ -35,6 +37,7 @@
 # MAGIC - Every run logged in **MLflow** (scores, settings, the models).
 # MAGIC - The final model registered in **Unity Catalog** as `workspace.armd.urine_resistance_model`.
 # MAGIC - Test-year predictions saved to `workspace.armd.gold_test_predictions` for notebook 04.
+# MAGIC - Every input ranked by importance, saved to `workspace.armd.gold_feature_importance`.
 # MAGIC - 2021 validation predictions saved to `workspace.armd.gold_validation_predictions`, so notebook
 # MAGIC   04 can choose its settings without looking at the test years.
 
@@ -67,6 +70,46 @@ ANTIBIOGRAM_YEARS = 1
 #  2. Most outpatients have none (58% of rows have no labs), and the demo is simpler without them.
 # Section 4 measures how much they would add, so the team can make an informed call.
 USE_LABS_VITALS = False
+
+# Gradient-boosting settings to try in Step A. The best one on 2021 is used from then on.
+# The first is the setting used before tuning was added, so tuning can only match or beat it.
+#  - learning_rate: how big a step each new tree takes (smaller = slower but often more accurate)
+#  - max_leaf_nodes: how detailed each tree can be
+#  - min_samples_leaf: the fewest cultures a tree may base a decision on (higher = less overfitting)
+#  - l2_regularization: a brake on extreme predictions
+GB_CANDIDATES = [
+    {"learning_rate": 0.05, "max_leaf_nodes": 31, "min_samples_leaf": 50,  "l2_regularization": 1.0},
+    {"learning_rate": 0.05, "max_leaf_nodes": 15, "min_samples_leaf": 100, "l2_regularization": 1.0},
+    {"learning_rate": 0.05, "max_leaf_nodes": 63, "min_samples_leaf": 50,  "l2_regularization": 1.0},
+    {"learning_rate": 0.03, "max_leaf_nodes": 31, "min_samples_leaf": 100, "l2_regularization": 3.0},
+    {"learning_rate": 0.10, "max_leaf_nodes": 31, "min_samples_leaf": 50,  "l2_regularization": 1.0},
+    {"learning_rate": 0.05, "max_leaf_nodes": 31, "min_samples_leaf": 200, "l2_regularization": 10.0},
+]
+GB_PARAMS = dict(GB_CANDIDATES[0])   # replaced by the best candidate in section 4
+
+# Features added in the "model improvements" round. Section 4 measures what they add by training
+# once without them.
+NEW_FEATURE_PREFIXES = ("days_since_drug_", "days_since_subtype_", "days_since_resist_",
+                        "n_antibiotic_days_", "n_prior_cultures_", "comorb_", "n_comorbidities")
+
+# Section 6b ranks the inputs by importance. It scores the test cultures a few hundred times, which
+# takes several minutes; set RUN_IMPORTANCE to False to skip it.
+RUN_IMPORTANCE = True
+IMPORTANCE_REPEATS = 3            # shuffles per input (more = steadier numbers, slower)
+IMPORTANCE_MIN_RESISTANT = 200    # skip drugs with fewer resistant test cultures: too noisy to rank on
+# Which group each input belongs to: (group name, how the input's name starts)
+FEATURE_GROUPS = [
+    ("Past resistance", ("prior_resist_", "days_since_resist_", "n_prior_resistant_drugs")),
+    ("Antibiotic exposure", ("abx_class_", "days_since_drug_", "days_since_subtype_",
+                             "days_since_last_antibiotic", "n_antibiotic_days_")),
+    ("Past organisms", ("prior_org_", "n_prior_cultures_")),
+    ("Where the culture was ordered", ("ward_", "is_inpatient")),
+    ("Demographics", ("age_min", "gender", "adi_")),
+    ("Procedures", ("proc_",)),
+    ("Nursing home", ("nursing_home",)),
+    ("Comorbidities", ("comorb_", "n_comorbidities")),
+    ("Labs and vital signs", ("lab_", "vital_")),
+]
 
 MODEL_NAME = tbl("urine_resistance_model")
 EXPERIMENT_NAME = "flemingrx_urine_resistance"
@@ -117,10 +160,10 @@ def make_model(kind):
             LogisticRegression(max_iter=2000),
         )
     if kind == "gradient_boosting":
-        # handles missing values by itself; stops adding trees once a held-out 10% stops improving
+        # handles missing values by itself; stops adding trees once a held-out 10% stops improving.
+        # GB_PARAMS holds the tunable settings (see GB_CANDIDATES).
         return HistGradientBoostingClassifier(
-            learning_rate=0.05, max_iter=500, max_leaf_nodes=31, min_samples_leaf=50,
-            l2_regularization=1.0, early_stopping=True, validation_fraction=0.1,
+            **GB_PARAMS, max_iter=1000, early_stopping=True, validation_fraction=0.1,
             n_iter_no_change=30, random_state=SEED,
         )
     raise ValueError(kind)
@@ -178,6 +221,27 @@ def average_by_model(rows):
     return out
 
 
+def feature_group(name):
+    """The group in FEATURE_GROUPS that an input belongs to."""
+    return next((group for group, starts in FEATURE_GROUPS if name.startswith(starts)), "Other")
+
+
+def auroc_drop(model, X_eval, y_eval, columns, repeats, rng):
+    """How much AUROC falls when `columns` are shuffled between patients (averaged over `repeats`).
+
+    Shuffling an input keeps its values but breaks its link to the patient, so the model can no
+    longer use it. A big drop means the model relies on it. Several columns are shuffled together
+    (each patient gets another patient's whole set), which measures a group of inputs at once.
+    """
+    base = roc_auc_score(y_eval, model.predict_proba(X_eval)[:, 1])
+    drops = []
+    for _ in range(repeats):
+        shuffled = X_eval.copy()
+        shuffled[:, columns] = X_eval[rng.permutation(len(X_eval))][:, columns]
+        drops.append(base - roc_auc_score(y_eval, model.predict_proba(shuffled)[:, 1]))
+    return float(np.mean(drops))
+
+
 def calibration_table(y, p, bins=10):
     """Group cultures by predicted chance and compare with how often they were really resistant."""
     edges = np.unique(np.quantile(p, np.linspace(0, 1, bins + 1)))
@@ -223,11 +287,36 @@ print("Drugs:", ", ".join(DRUG_LABEL[d] for d in DRUGS))
 # MAGIC %md
 # MAGIC ## 4. Step A: choose the approach (train 2008-2020, compare on 2021)
 # MAGIC The test years (2022+) are not touched here.
+# MAGIC
+# MAGIC **First, tune gradient boosting.** Each setting in `GB_CANDIDATES` is trained on 2008-2020 and
+# MAGIC scored on 2021; the one with the highest average AUROC is kept for the rest of the notebook.
+# MAGIC Because this only looks at 2021, the test years still give an honest final score.
 
 # COMMAND ----------
 
 step_a_train = (~is_test) & (year < VALIDATION_YEAR)
 step_a_eval = (~is_test) & (year == VALIDATION_YEAR)
+
+tuning_rows = []
+for i, params in enumerate(GB_CANDIDATES):
+    GB_PARAMS = dict(params)
+    rows, _ = compare_models(X, y, drug, year, FEATURES, DRUGS, step_a_train, step_a_eval,
+                             ["gradient_boosting"])
+    scores = average_by_model(rows)[0]
+    tuning_rows.append({"setting": i, **params, "mean_auroc": scores["mean_auroc"],
+                        "mean_brier": scores["mean_brier"]})
+
+best_setting = max(tuning_rows, key=lambda r: r["mean_auroc"])["setting"]   # ties: earliest wins
+GB_PARAMS = dict(GB_CANDIDATES[best_setting])
+display(pd.DataFrame(tuning_rows))
+print(f"Chosen gradient-boosting setting {best_setting}: {GB_PARAMS}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Then compare the four approaches** on 2021, with gradient boosting at its chosen setting.
+
+# COMMAND ----------
 
 val_rows, val_predictions = compare_models(X, y, drug, year, FEATURES, DRUGS, step_a_train,
                                            step_a_eval, BASELINES + ML_MODELS)
@@ -257,6 +346,31 @@ display(pd.DataFrame([
      "auroc_with_labs": r["auroc"], "gain": round(r["auroc"] - without[r["antibiotic"]], 3)}
     for r in with_rows
 ]))
+del X_with_labs   # free the memory; only needed for this comparison
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Do the new features help?
+# MAGIC Same comparison again: gradient boosting with and without the features added in the
+# MAGIC improvements round (specific drugs, antibiotic subtypes, "days since" timings, yearly counts and
+# MAGIC comorbidities; see `NEW_FEATURE_PREFIXES`). A positive gain on most drugs means they earn their
+# MAGIC place.
+
+# COMMAND ----------
+
+OLD_FEATURES = [c for c in FEATURES if not c.startswith(NEW_FEATURE_PREFIXES)]
+old_idx = [FEATURES.index(c) for c in OLD_FEATURES]
+old_rows, _ = compare_models(X[:, old_idx], y, drug, year, OLD_FEATURES, DRUGS, step_a_train,
+                             step_a_eval, ["gradient_boosting"])
+with_new = {r["antibiotic"]: r["auroc"] for r in val_rows if r["model"] == "gradient_boosting"}
+print(f"{len(FEATURES) - len(OLD_FEATURES)} new features ({len(OLD_FEATURES)} before, {len(FEATURES)} now)")
+display(pd.DataFrame([
+    {"antibiotic": r["antibiotic"], "auroc_old_features": r["auroc"],
+     "auroc_with_new_features": with_new[r["antibiotic"]],
+     "gain": round(with_new[r["antibiotic"]] - r["auroc"], 3)}
+    for r in old_rows
+]))
 
 # COMMAND ----------
 
@@ -282,7 +396,9 @@ with mlflow.start_run(run_name=f"final_{BEST_MODEL}") as run:
         "chosen_model": BEST_MODEL, "use_labs_vitals": USE_LABS_VITALS,
         "n_features": len(FEATURES), "train_years": f"2008-{VALIDATION_YEAR}", "test_years": "2022+",
         "antibiogram_years": ANTIBIOGRAM_YEARS,
+        **{f"gb_{k}": v for k, v in GB_PARAMS.items()},
     })
+    mlflow.log_table(pd.DataFrame(tuning_rows), artifact_file="gb_tuning_2021.json")
     for r in test_rows:
         for metric in ("auroc", "auprc", "brier"):
             if not np.isnan(r[metric]):
@@ -312,6 +428,75 @@ for d in DRUGS:
     for row in calibration_table(y[pred["rows"]], pred["p"]):
         calibration_rows.append({"antibiotic": d, **row})
 display(pd.DataFrame(calibration_rows))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 6b. Which inputs matter most?
+# MAGIC For each input, we shuffle its values between the test patients and measure how much the chosen
+# MAGIC model's AUROC falls. A bigger fall means the model relies on that input more. This is called
+# MAGIC permutation importance.
+# MAGIC
+# MAGIC **How to read the tables:**
+# MAGIC - **Groups first.** Inputs that say nearly the same thing share the credit: "days since
+# MAGIC   nitrofurantoin" and "nitrofuran class in the last 90 days" overlap, so each looks smaller alone
+# MAGIC   than the information is worth. The group table shuffles a whole group together, which is the
+# MAGIC   fairer summary.
+# MAGIC - **A fall near 0** means removing that one input changes almost nothing. It does not mean the
+# MAGIC   fact is medically irrelevant.
+# MAGIC - Figures are averaged over the antibiotics with enough resistant test cultures to rank on
+# MAGIC   (`IMPORTANCE_MIN_RESISTANT`); meropenem has too few.
+# MAGIC
+# MAGIC The full ranking is saved to `workspace.armd.gold_feature_importance`. The demo app can use it
+# MAGIC to say *why* a patient's prediction is high.
+
+# COMMAND ----------
+
+if RUN_IMPORTANCE:
+    rng = np.random.default_rng(SEED)
+    scored_drugs = [d for d in DRUGS
+                    if y[test_predictions[(d, BEST_MODEL)]["rows"]].sum() >= IMPORTANCE_MIN_RESISTANT]
+    groups = list(dict.fromkeys(feature_group(f) for f in FEATURES))
+    feature_drops = {f: {} for f in FEATURES}
+    group_drops = {g: {} for g in groups}
+    for d in scored_drugs:
+        pred = test_predictions[(d, BEST_MODEL)]
+        X_eval, y_eval, model = X[pred["rows"]], y[pred["rows"]], pred["model"]
+        for j, f in enumerate(FEATURES):
+            feature_drops[f][d] = auroc_drop(model, X_eval, y_eval, [j], IMPORTANCE_REPEATS, rng)
+        for g in groups:
+            members = [j for j, f in enumerate(FEATURES) if feature_group(f) == g]
+            group_drops[g][d] = auroc_drop(model, X_eval, y_eval, members, IMPORTANCE_REPEATS, rng)
+
+    group_importance = pd.DataFrame([
+        {"group": g, "inputs": sum(feature_group(f) == g for f in FEATURES),
+         "mean_auroc_drop": round(float(np.mean(list(drops.values()))), 4)}
+        for g, drops in group_drops.items()
+    ]).sort_values("mean_auroc_drop", ascending=False, ignore_index=True)
+
+    feature_importance = pd.DataFrame([
+        {"feature": f, "group": feature_group(f),
+         "mean_auroc_drop": round(float(np.mean(list(drops.values()))), 4),
+         "matters_most_for": max(drops, key=drops.get),
+         **{f"drop_{d}": round(drops[d], 4) for d in scored_drugs}}
+        for f, drops in feature_drops.items()
+    ]).sort_values("mean_auroc_drop", ascending=False, ignore_index=True)
+    feature_importance.insert(0, "rank", feature_importance.index + 1)
+
+    (
+        spark.createDataFrame(feature_importance)
+        .write.mode("overwrite").option("overwriteSchema", True)
+        .saveAsTable(tbl("gold_feature_importance"))
+    )
+    with mlflow.start_run(run_id=RUN_ID):
+        mlflow.log_table(feature_importance, artifact_file="feature_importance.json")
+        mlflow.log_table(group_importance, artifact_file="feature_group_importance.json")
+
+    print(f"Ranked {len(FEATURES)} inputs on {len(scored_drugs)} antibiotics: {', '.join(scored_drugs)}")
+    display(group_importance)
+    display(feature_importance.head(25))
+else:
+    print("RUN_IMPORTANCE is False: skipped.")
 
 # COMMAND ----------
 
