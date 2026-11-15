@@ -12,7 +12,8 @@
 # MAGIC - **Features**: only what was known **when the culture was ordered**: age, sex, ward,
 # MAGIC   antibiotics taken recently (by class, subtype and specific drug, and how many days ago), past
 # MAGIC   resistant infections (and how long ago), past organisms, recent procedures, nursing-home
-# MAGIC   contact, long-term diagnoses (if notebook 01b was run), recent labs and vital signs.
+# MAGIC   contact, recent labs and vital signs. Long-term diagnoses (comorbidities) are optional and off by
+# MAGIC   default (see `USE_COMORBIDITIES`).
 # MAGIC - **Split**: older cultures are for training, the most recent years are held back for testing.
 # MAGIC
 # MAGIC ### The one rule that matters most: no data leakage
@@ -87,8 +88,14 @@ SPECIFIC_ANTIBIOTICS = {
 
 # Comorbidities (diagnoses such as diabetes or kidney disease) need the extra table from notebook
 # 01b. If that table doesn't exist, this notebook skips them and still runs.
-USE_COMORBIDITIES = True
+# OFF by default: on the 2022+ test years they raised gradient boosting's mean AUROC by only
+# ~0.001 (0.736 -> 0.737), while adding 61 inputs the demo app would have to fill. The medication
+# and resistance history already carries that information. Set to True to bring them back.
+USE_COMORBIDITIES = False
 TOP_COMORBIDITIES = 60   # keep the N most common diagnoses in the training years as yes/no flags
+# Diagnosis groups that are never used as features. "Invalid PDX" is a billing artifact (an invalid
+# principal diagnosis code), not a medical condition.
+EXCLUDE_COMORBIDITIES = ["Invalid PDX"]
 
 # Lab results that count as "the drug will not work reliably" -> resistant = 1.
 # Intermediate results are counted as resistant because a doctor wouldn't rely on that drug.
@@ -484,7 +491,10 @@ culture_burden = (
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6c. Comorbidities (only if notebook 01b was run)
+# MAGIC ## 6c. Comorbidities (off by default; needs notebook 01b)
+# MAGIC Skipped unless `USE_COMORBIDITIES = True`. They were tested and added almost nothing (test AUROC
+# MAGIC 0.736 -> 0.737), so the final model leaves them out. The code stays so the team can re-check.
+# MAGIC
 # MAGIC Long-term conditions such as diabetes, kidney disease or a urinary-tract disorder. They come from
 # MAGIC `bronze_comorbidity`, one row per (culture, diagnosis) with the day the diagnosis started.
 # MAGIC
@@ -531,7 +541,7 @@ if USE_COMORBIDITIES and table_exists("bronze_comorbidity"):
         "Most start days are negative, so this file may count days the other way round. "
         "Check the columns in notebook 01b before going on.")
 
-    before = comorbidity.where(F.col("_days") >= 1)
+    before = comorbidity.where((F.col("_days") >= 1) & ~F.col("component").isin(EXCLUDE_COMORBIDITIES))
     top = [r["component"] for r in (
         before.where(F.col("split") == "train")
         .groupBy("component").agg(F.countDistinct("order_proc_id_coded").alias("cultures"))
