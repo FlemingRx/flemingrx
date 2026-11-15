@@ -6,6 +6,9 @@
 # MAGIC urinary-tract disorders...) into `workspace.armd.bronze_comorbidity`. Notebook 02 turns them into
 # MAGIC features. If you skip this notebook, 02 still runs, just without comorbidities.
 # MAGIC
+# MAGIC **Only needed to re-check comorbidities.** Notebook 02 has them switched off
+# MAGIC (`USE_COMORBIDITIES = False`): when tested they raised the test AUROC by only ~0.001.
+# MAGIC
 # MAGIC **Why it's separate from 01:** the file is ~19.7 GB, too big for the Databricks upload page
 # MAGIC (5 GB per file). So it goes through one extra step on your laptop first.
 # MAGIC
