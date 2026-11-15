@@ -42,6 +42,14 @@ def patient_record(record: dict):
     record_card("setting", "local_hospital", "Care setting",
                 [("Where the culture was ordered", record["care_setting"]),
                  ("Nursing home contact on record", "Yes" if record["nursing_home"] else "No")])
+    vital = lambda name, unit: (f"{record[name]:g} {unit}" if record.get(name) is not None   # noqa: E731
+                                else "Not recorded")
+    record_card("vitals", "monitor_heart", "Vital signs",
+                [("Temperature", vital("temperature_f", "°F")),
+                 ("Heart rate", vital("heart_rate", "per minute")),
+                 ("Breathing rate", vital("respiratory_rate", "per minute")),
+                 ("Systolic blood pressure", vital("systolic_bp", "mmHg"))],
+                "48 hours before the culture")
     record_card("resist", "coronavirus", "Resistance history",
                 [("Earlier culture resistant to", names(record["resistant_to"], policy.drug_label)),
                  ("Other antibiotics with resistance", record["other_resistant_count"])],

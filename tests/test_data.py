@@ -71,3 +71,90 @@ class PackagedModel:
 def test_predict_scores_the_packaged_per_drug_models_directly():
     out = data.predict(PackagedModel(), FEATURES, data.blank_patient(FEATURES))
     assert out.to_dict() == {"nitrofurantoin": 0.3, "meropenem": 0.02}
+
+
+NEW_FEATURES = ["age_min", "gender", "ward_ip", "ward_op", "ward_er", "ward_icu", "is_inpatient",
+                "nursing_home", "days_since_last_antibiotic", "abx_class_fluoroquinolone_90d",
+                "abx_class_beta_lactam_90d", "prior_org_escherichia", "prior_resist_ciprofloxacin",
+                "n_prior_resistant_drugs", "proc_urethral_catheter",
+                "days_since_drug_ciprofloxacin", "days_since_subtype_fluoroquinolone",
+                "days_since_subtype_penicillin", "days_since_resist_ciprofloxacin",
+                "days_since_resist_nitrofurantoin", "n_antibiotic_days_365d", "n_prior_cultures_365d",
+                "comorb_diabetes", "n_comorbidities"]
+RECORD = {"age_band": "75-84", "sex": "Male", "care_setting": "Hospital ward", "nursing_home": False,
+          "resistant_to": ["ciprofloxacin"], "other_resistant_count": 0,
+          "recent_antibiotic_classes": ["fluoroquinolone", "beta_lactam"],
+          "days_since_last_antibiotic": 14, "prior_organisms": ["escherichia"],
+          "recent_procedures": ["urethral_catheter"]}
+
+
+def test_the_newer_models_inputs_are_filled_the_way_notebook_02_fills_them():
+    blank = data.blank_patient(NEW_FEATURES)
+    assert blank["days_since_drug_ciprofloxacin"] == blank["days_since_resist_nitrofurantoin"] == data.NEVER
+    assert blank["n_antibiotic_days_365d"] == blank["comorb_diabetes"] == blank["n_comorbidities"] == 0
+
+    patient = data.patient_features(NEW_FEATURES, RECORD)
+    assert list(patient) == NEW_FEATURES and not any(math.isnan(v) for v in patient.values())
+    assert patient["days_since_resist_ciprofloxacin"] == data.RESISTANCE_DAYS_AGO
+    assert patient["days_since_resist_nitrofurantoin"] == data.NEVER          # no such resistance
+    assert patient["days_since_subtype_fluoroquinolone"] == 14               # last antibiotic 14 days ago
+    assert patient["days_since_subtype_penicillin"] == data.NEVER            # no matching subtype
+    assert patient["days_since_drug_ciprofloxacin"] == data.NEVER            # the drug itself isn't recorded
+    assert patient["n_antibiotic_days_365d"] == 1 and patient["n_prior_cultures_365d"] == 1
+
+    none = data.patient_features(NEW_FEATURES, {**RECORD, "resistant_to": [], "prior_organisms": [],
+                                               "recent_antibiotic_classes": [],
+                                               "days_since_last_antibiotic": data.NO_RECENT_ANTIBIOTIC})
+    assert none["n_antibiotic_days_365d"] == 0 and none["n_prior_cultures_365d"] == 0
+
+
+def test_severity_comes_from_care_setting_and_vital_signs():
+    import policy
+
+    level = lambda **changes: policy.SEVERITY_LEVELS[data.severity_of({**RECORD, **changes})]   # noqa: E731
+    assert level(care_setting="Outpatient clinic") == "Mild"                 # no vital signs recorded
+    assert level(care_setting="Emergency department") == "Mild"
+    assert level() == "Systemic signs"                                       # admitted to a ward
+    assert level(care_setting="Outpatient clinic", temperature_f=100.9) == "Systemic signs"
+    assert level(care_setting="Outpatient clinic", heart_rate=95, respiratory_rate=21) == "Systemic signs"
+    assert level(care_setting="Intensive care unit") == "Severe"
+    assert level(care_setting="Outpatient clinic", systolic_bp=88) == "Severe"
+    assert level(respiratory_rate=22, systolic_bp=96) == "Severe"
+
+
+def test_bars_fall_back_to_the_notebook_defaults_when_mlflow_cannot_be_read(monkeypatch):
+    import mlflow
+    import policy
+
+    def unreachable(*args, **kwargs):
+        raise ConnectionError("no Databricks here")
+
+    monkeypatch.setattr(mlflow, "MlflowClient", unreachable)
+    bars, source = data.severity_bars()
+    assert bars == policy.DEFAULT_SEVERITY_BARS and "defaults" in source and "ConnectionError" in source
+
+
+def test_bars_are_read_from_the_newest_mlflow_run_that_logged_them(monkeypatch):
+    import types
+
+    import mlflow
+
+    run = lambda name, params: types.SimpleNamespace(                        # noqa: E731
+        info=types.SimpleNamespace(run_name=name, experiment_id="7"), data=types.SimpleNamespace(params=params))
+
+    class Client:
+        def __init__(self, **kwargs): pass
+        def search_model_versions(self, query): return [types.SimpleNamespace(version="3", run_id="a"),
+                                                        types.SimpleNamespace(version="12", run_id="b")]
+        def get_run(self, run_id): assert run_id == "b"; return run("training", {})
+        def search_runs(self, experiments, order_by, max_results):
+            return [run("training", {"n_features": "105"}),
+                    run("recommendation_policy", {"severity_bar_mild": "0.8", "severity_bar_severe": "0.97",
+                                                  "severity_bar_systemic_signs": "0.9"}),
+                    run("older_policy", {"severity_bar_mild": "0.5", "severity_bar_severe": "0.5",
+                                         "severity_bar_systemic_signs": "0.5"})]
+
+    monkeypatch.setattr(mlflow, "MlflowClient", Client)
+    bars, source = data.severity_bars()
+    assert bars == {"Mild": 0.8, "Systemic signs": 0.9, "Severe": 0.97}
+    assert "recommendation_policy" in source and "version 12" in source

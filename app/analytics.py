@@ -200,7 +200,7 @@ def recommendation_decisions(stats: dict, pages: dict):
                 f'<div class="fx-kv"><span>{reason}</span><b>{count}</b></div>'
                 for reason, count in stats["no_antibiotic_reasons"]))
         st.html('<div class="fx-section">When the model had no good option</div>'
-                f'<div class="fx-kv"><span>No antibiotic reached the 90% bar (broadest offered)</span>'
+                f'<div class="fx-kv"><span>No antibiotic reached the bar for the severity level (broadest offered)</span>'
                 f'<b>{stats["none_cleared"]} of {stats["with_chances"]}</b></div>')
 
         with st.container(horizontal=True, key="an_decision_links"):

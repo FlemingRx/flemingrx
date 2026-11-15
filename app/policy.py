@@ -1,7 +1,8 @@
 """The recommendation rule, shared by the app and checked against notebook 04.
 
 The rule: go through the antibiotics from narrowest to broadest spectrum and recommend the first
-one whose predicted chance of working is at least the target. If none qualifies, recommend the
+one whose predicted chance of working is at least the target. The target (the "bar") depends on
+how sick the patient is: see the severity block below. If none qualifies, recommend the
 broadest. tests/test_policy.py checks this gives the same answer as notebook 04's `recommend`.
 """
 
@@ -34,6 +35,51 @@ USUAL_REGIMENS = {
     "piperacillin_tazobactam": ("4.5 g IV", "Every 8 hours", 7),
     "meropenem": ("1 g IV", "Every 8 hours", 7),
 }
+
+
+# --- Severity (notebook 04, section 5b) ---
+# How sick the patient looks decides how much risk of failure is acceptable, so each severity level
+# has its own bar. The level is worked out here; the bars themselves are read from the model's
+# MLflow run (data.severity_bars). DEFAULT_SEVERITY_BARS is only used if that can't be read.
+# Everything in this block mirrors notebook 04, and tests/test_policy.py checks it still does.
+SEVERITY_LEVELS = ["Mild", "Systemic signs", "Severe"]
+DEFAULT_SEVERITY_BARS = {"Mild": 0.85, "Systemic signs": 0.90, "Severe": 0.95}
+
+# Vital-sign cut-offs (standard sepsis-screening values; temperature is in Fahrenheit)
+FEVER_F = 100.4             # temperature at or above this = fever
+FAST_HEART = 90             # heart rate above this
+FAST_BREATHING = 20         # breaths per minute above this
+VERY_FAST_BREATHING = 22    # with LOW_NORMAL_SBP: two warning signs at once -> severe
+LOW_NORMAL_SBP = 100        # systolic blood pressure at or below this
+LOW_SBP = 90                # systolic blood pressure below this = low blood pressure
+
+
+def severity_level(icu, ward_ip, ward_er, temperature_f=None, heart_rate=None, respiratory_rate=None,
+                   systolic_bp=None) -> int:
+    """Position in SEVERITY_LEVELS for one patient (0 = mild, 1 = systemic signs, 2 = severe).
+
+    Care-setting flags are 1 for yes. A vital sign that wasn't recorded (None) counts as not abnormal.
+      severe:   intensive care, or low blood pressure, or very fast breathing with low-normal pressure
+      systemic: fever, or two of (fever, fast heart rate, fast breathing), or admitted to a ward
+      mild:     everyone else
+    """
+    fever = temperature_f is not None and temperature_f >= FEVER_F
+    fast_heart = heart_rate is not None and heart_rate > FAST_HEART
+    fast_breathing = respiratory_rate is not None and respiratory_rate > FAST_BREATHING
+    low_pressure = systolic_bp is not None and systolic_bp < LOW_SBP
+    breathing_and_pressure = (respiratory_rate is not None and systolic_bp is not None
+                              and respiratory_rate >= VERY_FAST_BREATHING
+                              and systolic_bp <= LOW_NORMAL_SBP)
+    if icu == 1 or low_pressure or breathing_and_pressure:
+        return 2
+    if fever or (fever + fast_heart + fast_breathing) >= 2 or (ward_ip == 1 and ward_er != 1):
+        return 1
+    return 0
+
+
+def severity_bar_param(level: str) -> str:
+    """The name notebook 04 logs a level's bar under in MLflow, e.g. severity_bar_systemic_signs."""
+    return "severity_bar_" + level.lower().replace(" ", "_")
 
 
 def drug_label(slug: str) -> str:

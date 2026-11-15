@@ -46,8 +46,19 @@ SEX_CODES = {"Female": 0, "Male": 1}
 AGE_BANDS = {"18-24": 18, "25-34": 25, "35-44": 35, "45-54": 45, "55-64": 55, "65-74": 65,
              "75-84": 75, "85-89": 85, "90 or older": 90}
 
-_ZERO_PREFIXES = ("abx_class_", "prior_org_", "prior_resist_", "proc_", "ward_")
-_ZERO_NAMES = {"nursing_home", "n_prior_resistant_drugs", "is_inpatient"}
+# Notebook 02's value for "never" in the days_since_drug_ / _subtype_ / _resist_ features
+# (it looks back 2 years, so never = 731).
+NEVER = 731
+# The patient record says an event happened within a window (resistance in the past year, an
+# antibiotic class in the last 90 days) but not on which day. The model wants a number of days, so
+# we use the middle of the window. This is an approximation; the real fix is to store the dates.
+RESISTANCE_DAYS_AGO = 180
+CLASS_DAYS_AGO = 45
+
+# How notebook 02 fills a feature when the patient has no such history.
+_ZERO_PREFIXES = ("abx_class_", "prior_org_", "prior_resist_", "proc_", "ward_", "comorb_", "n_")
+_ZERO_NAMES = {"nursing_home", "is_inpatient"}
+_NEVER_PREFIXES = ("days_since_drug_", "days_since_subtype_", "days_since_resist_")
 
 
 # ----------------------------------------------------------------------------- loading
@@ -130,6 +141,8 @@ def blank_patient(features) -> dict:
             patient[name] = 0.0
         elif name == "days_since_last_antibiotic":
             patient[name] = float(NO_RECENT_ANTIBIOTIC)
+        elif name.startswith(_NEVER_PREFIXES):
+            patient[name] = float(NEVER)
         else:
             patient[name] = math.nan        # age, sex, deprivation index: unknown until filled in
     return patient
@@ -152,7 +165,61 @@ def patient_features(features, record: dict) -> dict:
     for name in flags:
         if name in patient:      # the model has no feature for anything else, so it can't use it
             patient[name] = 1.0
+
+    # The newer model also asks how long ago things happened and how often. The record only has
+    # part of that, so these are filled from what it does say (see the constants at the top).
+    last = record["days_since_last_antibiotic"]
+    timings = {f"days_since_resist_{drug}": RESISTANCE_DAYS_AGO for drug in record["resistant_to"]}
+    timings.update({f"days_since_subtype_{name}": min(last, CLASS_DAYS_AGO)
+                    for name in record["recent_antibiotic_classes"]})
+    timings["n_antibiotic_days_365d"] = 1 if last < NO_RECENT_ANTIBIOTIC else 0
+    timings["n_prior_cultures_365d"] = 1 if record["prior_organisms"] or record["resistant_to"] else 0
+    for name, value in timings.items():
+        if name in patient:
+            patient[name] = float(value)
     return {name: patient[name] for name in features}
+
+
+def severity_bars() -> tuple[dict, str]:
+    """({severity level: required chance of working}, where that came from).
+
+    The bars are not inside the model file. Notebook 04 logs them to MLflow, as severity_bar_<level>
+    on its "recommendation_policy" run, in the same experiment as the registered model's training
+    run. This reads the newest such run. If MLflow can't be reached, it falls back to notebook 04's
+    defaults (policy.DEFAULT_SEVERITY_BARS) and says so.
+    """
+    import policy
+
+    try:
+        import mlflow
+
+        client = mlflow.MlflowClient(tracking_uri="databricks", registry_uri="databricks-uc")
+        versions = client.search_model_versions(f"name='{MODEL_NAME}'")
+        latest = max(versions, key=lambda version: int(version.version))
+        experiment = client.get_run(latest.run_id).info.experiment_id
+        runs = client.search_runs([experiment], order_by=["attributes.start_time DESC"],
+                                  max_results=25)
+        for run in runs:
+            logged = {level: run.data.params.get(policy.severity_bar_param(level))
+                      for level in policy.SEVERITY_LEVELS}
+            if all(logged.values()):
+                return ({level: float(value) for level, value in logged.items()},
+                        f"MLflow run \"{run.info.run_name}\", model version {latest.version}")
+        reason = "no MLflow run has the severity bars logged"
+    except Exception as error:      # no Databricks sign-in, no network, no permission...
+        reason = f"MLflow could not be read ({type(error).__name__})"
+    return dict(policy.DEFAULT_SEVERITY_BARS), f"notebook 04's defaults; {reason}"
+
+
+def severity_of(record: dict) -> int:
+    """The patient's severity level (a position in policy.SEVERITY_LEVELS), from their record."""
+    import policy
+
+    setting = SETTINGS[record["care_setting"]]
+    return policy.severity_level(setting.get("ward_icu", 0), setting.get("ward_ip", 0),
+                                 setting.get("ward_er", 0), record.get("temperature_f"),
+                                 record.get("heart_rate"), record.get("respiratory_rate"),
+                                 record.get("systolic_bp"))
 
 
 def options(features, prefix: str, suffix: str = "") -> dict:

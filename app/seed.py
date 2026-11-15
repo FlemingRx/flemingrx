@@ -25,10 +25,15 @@ CLINICIANS = [
 ]
 
 
+VITALS = ("temperature_f", "heart_rate", "respiratory_rate", "systolic_bp")
+
+
 def _patient(number, clinicians, age_band, sex, care_setting, nursing_home=False, resistant_to=(),
              other_resistant_count=0, recent_antibiotic_classes=(), days_since_last_antibiotic=366,
              prior_organisms=(), recent_procedures=(), symptoms=("Dysuria", "Urinary frequency"),
-             allergies=(), egfr=88, pregnancy=None):
+             allergies=(), egfr=88, pregnancy=None, vitals=(98.4, 78, 16, 122)):
+    # vitals: (temperature in Fahrenheit, heart rate, breathing rate, systolic blood pressure);
+    # None for one that wasn't recorded
     if pregnancy is None:     # only asked of women of childbearing age
         of_age = age_band in ("18-24", "25-34", "35-44", "45-54")
         pregnancy = "Not pregnant" if sex == "Female" and of_age else "Not applicable"
@@ -43,6 +48,7 @@ def _patient(number, clinicians, age_band, sex, care_setting, nursing_home=False
             "prior_organisms": list(prior_organisms), "recent_procedures": list(recent_procedures),
             "symptoms": list(symptoms), "allergies": list(allergies), "egfr": egfr,
             "pregnancy": pregnancy,
+            **dict(zip(VITALS, vitals)),
         },
     }
 
@@ -55,7 +61,8 @@ PATIENTS = [
     _patient("PT-00391", ["sarahmitchell"], "75-84", "Male", "Hospital ward",
              resistant_to=["ciprofloxacin"], recent_antibiotic_classes=["fluoroquinolone"],
              days_since_last_antibiotic=60, prior_organisms=["escherichia", "enterococcus"],
-             recent_procedures=["urethral_catheter"], symptoms=["Dysuria", "Fever"], egfr=61),
+             recent_procedures=["urethral_catheter"], symptoms=["Dysuria", "Fever"], egfr=61,
+             vitals=(100.8, 88, 18, 126)),
     _patient("PT-00399", ["sarahmitchell", "jokafor"], "35-44", "Female", "Outpatient clinic",
              resistant_to=["trimethoprim_sulfamethoxazole"],
              recent_antibiotic_classes=["sulfonamide"], days_since_last_antibiotic=60,
@@ -66,7 +73,7 @@ PATIENTS = [
              other_resistant_count=3, recent_antibiotic_classes=["beta_lactam", "fluoroquinolone"],
              days_since_last_antibiotic=14, prior_organisms=["klebsiella", "escherichia"],
              recent_procedures=["urethral_catheter"], symptoms=["Fever", "Suprapubic pain"],
-             egfr=38),
+             egfr=38, vitals=(101.2, 96, 20, 112)),
     _patient("PT-00408", ["sarahmitchell", "jokafor"], "55-64", "Male", "Outpatient clinic",
              recent_antibiotic_classes=["nitrofuran"], days_since_last_antibiotic=60,
              prior_organisms=["proteus"], recent_procedures=["surgical_procedure"]),
@@ -77,7 +84,7 @@ PATIENTS = [
              recent_antibiotic_classes=["fluoroquinolone", "glycopeptide"],
              days_since_last_antibiotic=14, prior_organisms=["escherichia", "pseudomonas"],
              recent_procedures=["urethral_catheter", "cvc"], symptoms=["Fever", "Flank pain"],
-             allergies=["sulfonamide"], egfr=52),
+             allergies=["sulfonamide"], egfr=52, vitals=(102.1, 112, 24, 88)),
     _patient("PT-00403", ["jokafor"], "65-74", "Male", "Hospital ward",
              resistant_to=["cefazolin"], recent_antibiotic_classes=["beta_lactam"],
              days_since_last_antibiotic=14, prior_organisms=["enterococcus"],
@@ -98,15 +105,18 @@ PATIENTS = [
     _patient("PT-00424", ["sarahmitchell"], "25-34", "Female", "Outpatient clinic",
              symptoms=["Dysuria", "Urinary frequency", "Urgency"]),
     _patient("PT-00427", ["sarahmitchell"], "75-84", "Female", "Outpatient clinic",
-             nursing_home=True, prior_organisms=["escherichia"], symptoms=[], egfr=64),
+             nursing_home=True, prior_organisms=["escherichia"], symptoms=[], egfr=64,
+             vitals=(None, None, None, None)),
     _patient("PT-00430", ["sarahmitchell", "jokafor"], "25-34", "Female", "Outpatient clinic",
              resistant_to=["nitrofurantoin", "cefazolin"], prior_organisms=["escherichia"],
-             symptoms=["Dysuria", "Urgency"], allergies=["sulfonamide"], pregnancy="Pregnant"),
+             symptoms=["Dysuria", "Urgency"], allergies=["sulfonamide"], pregnancy="Pregnant",
+             vitals=(100.9, 86, 16, 118)),
     _patient("PT-00433", ["sarahmitchell", "praman"], "65-74", "Male", "Hospital ward",
              resistant_to=["ciprofloxacin", "ceftriaxone"],
              recent_antibiotic_classes=["fluoroquinolone"], days_since_last_antibiotic=14,
              prior_organisms=["klebsiella"], recent_procedures=["urethral_catheter"],
-             symptoms=["Fever", "Suprapubic pain"], allergies=["penicillin"], egfr=24),
+             symptoms=["Fever", "Suprapubic pain"], allergies=["penicillin"], egfr=24,
+             vitals=(101.5, 104, 22, 96)),
 ]
 
 
@@ -201,6 +211,13 @@ def fill_new_columns(connection) -> None:
                            .where(db.patients.c.patient_number == row["patient_number"],
                                   db.patients.c.symptoms.is_(None))
                            .values({name: row[name] for name in new}))
+        # Vital signs came later still. All four empty means "not filled yet" for a demo patient,
+        # unless the demo patient really has none recorded, in which case there is nothing to set.
+        if any(row[name] is not None for name in VITALS):
+            connection.execute(db.patients.update()
+                               .where(db.patients.c.patient_number == row["patient_number"],
+                                      *[db.patients.c[name].is_(None) for name in VITALS])
+                               .values({name: row[name] for name in VITALS}))
     # Demo prescriptions from before decisions were recorded: work the decision out from the drugs.
     undecided = connection.execute(
         db.sa.select(db.prescriptions.c.id, db.prescriptions.c.drug,

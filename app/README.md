@@ -10,7 +10,7 @@ assigned to them. Screens, from the sidebar:
   today's counts, patients needing reassessment, cultures awaiting a result or review, and a
   7-day stewardship snapshot. Every count, row and "See all" opens the screen behind it.
 - **Clinical Assessment**: opens on the list of the clinician's patients. Selecting one shows
-  their details from the database, four pre-checks (symptoms, allergies, kidney function,
+  their details from the database, their severity level and the bar it sets, four pre-checks (symptoms, allergies, kidney function,
   pregnancy), each antibiotic's predicted chance of working, and the pick. The clinician accepts
   the recommendation, overrides it with a reason, or decides not to treat; the first two are
   saved as a prescription, and if the patient already has one it is shown instead. Each
@@ -62,7 +62,7 @@ Eight tables (defined in `db.py`):
 | Table | What it holds |
 |---|---|
 | `clinicians` | One row per login: username, name, role, and a salted hash of the password. |
-| `patients` | One row per patient: patient number and the details the model uses (age band, sex, care setting, nursing home contact, resistance history, antibiotic exposure, earlier organisms, procedures), plus what the pre-checks use (symptoms, allergies, eGFR, pregnancy). |
+| `patients` | One row per patient: patient number and the details the model uses (age band, sex, care setting, nursing home contact, resistance history, antibiotic exposure, earlier organisms, procedures), plus what the pre-checks use (symptoms, allergies, eGFR, pregnancy) and the vital signs that set the severity level. |
 | `clinician_patients` | One row per clinician and patient pair, so a patient can have several clinicians. |
 | `prescriptions` | What the model recommended for a patient and what the clinician prescribed: drug, dose, frequency, duration, start date, whether it was an acceptance or an override, and the override reason. |
 | `assessments` | The log. One row each time a recommendation is produced for a patient without a prescription: when, by which model, the bar, each antibiotic's predicted chance of working, whether anything cleared the bar, what the pre-checks found, and what the clinician decided (accepted, overridden, or no antibiotic) with the reason. |
@@ -105,6 +105,19 @@ that aren't there yet. It only ever adds; nothing a clinician has recorded is ch
 sign-in details are in `seed.py`. To start over, empty the tables and start the app again.
 
 Signing in lasts for the browser session: reloading the page signs you out.
+
+## The bar
+
+How likely an antibiotic must be to work before it is recommended (the "bar") is no longer a fixed
+90%. It depends on how sick the patient is, and it is read from the model's own evaluation:
+
+- `policy.severity_level` sorts each patient into Mild, Systemic signs or Severe from their care
+  setting and vital signs, using the same cut-offs as notebook 04.
+- `data.severity_bars` reads the bar for each level from MLflow: notebook 04 logs them as
+  `severity_bar_<level>` on its `recommendation_policy` run, in the same experiment as the
+  registered model. The bars are not stored inside the model file.
+- If MLflow can't be read (no Databricks sign-in), the app uses notebook 04's defaults and says
+  so under the severity line on the assessment.
 
 `tests/test_policy.py` checks that `policy.recommend` gives the same picks as the `recommend`
 function in notebook 04, so the app applies the rule that was evaluated.
@@ -156,8 +169,7 @@ The app looks for the model and table in this order:
 
 The footer shows which model is in use.
 
-Other settings: `TARGET_SUCCESS` (default `0.90`) sets where the slider starts, and `MODEL_NAME`
-picks a different registered model.
+Other settings: `MODEL_NAME` picks a different registered model.
 
 ### Versions
 

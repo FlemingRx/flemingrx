@@ -504,3 +504,10 @@ button[data-variant="pills"] { border-radius: 0 !important; }
 .st-key-dash_cards [data-testid="stLayoutWrapper"]:has(> [class*="st-key-dsee_"]),
 .st-key-dash_cards [data-testid="stElementContainer"]:has(> [class*="st-key-dsee_"]),
 .st-key-dash_cards [class*="st-key-dsee_"] { margin-top: auto; }
+
+/* severity and the bar it sets, above the pre-checks */
+.fx-severity { display: flex; flex-wrap: wrap; align-items: baseline; gap: .3rem 1.2rem; background: #fff;
+  border: 1px solid var(--fx-line); border-left: 4px solid var(--fx-navy); padding: .6rem .8rem;
+  font-size: .84rem; color: var(--fx-muted); }
+.fx-severity b { color: var(--fx-navy); font-size: .95rem; margin-left: .25rem; }
+.fx-severity small { font-size: .72rem; margin-left: auto; }

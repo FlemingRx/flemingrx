@@ -47,6 +47,11 @@ def get_model():
     return model, data.model_features(model)
 
 
+@st.cache_resource(show_spinner="Loading...")
+def get_severity_bars() -> tuple[dict, str]:
+    return data.severity_bars()
+
+
 @st.cache_data(show_spinner="Loading...")
 def get_table(name: str) -> pd.DataFrame:
     return data.load_table(name)
@@ -73,9 +78,6 @@ def top_bar(page_title: str, sample_data: bool):
         <span>FlemingRx</span><span class="fx-crumb-sep">›</span><b>{html.escape(page_title)}</b>
       </div>
       <div class="fx-topbar-right">
-        <span class="fx-chip fx-chip-teal"><span class="fx-dot"></span>Stewardship mode</span>
-        {sample}
-        <span class="fx-chip" title="{html.escape(data.model_source())}">Research demo</span>
       </div>
     </div>""")
 
@@ -309,11 +311,17 @@ def recommendation_panel(model, features, clinician: dict, record: dict):
     drugs = list(predictions.index)          # narrowest first
     risks = list(predictions.to_numpy())     # chance of resistance
 
-    with st.container(key="results"):
-        target = 90 / 100
+    # The bar depends on how sick the patient is, and comes from the model's own evaluation run.
+    severity = policy.SEVERITY_LEVELS[data.severity_of(record)]
+    bars, bars_source = get_severity_bars()
+    target = bars[severity]
 
+    with st.container(key="results"):
         picked = policy.recommend(risks, target)
         log_assessment(clinician, record, drugs, risks, picked, target)
+        st.html(f'<div class="fx-severity"><span>Severity <b>{severity}</b></span>'
+                f'<span>Required chance of working <b>{target:.0%}</b></span>'
+                f'<small>Bar from {html.escape(bars_source)}</small></div>')
         precheck_strip(record, drugs[picked])
         st.html(hero_html(policy.drug_label(drugs[picked]), 1 - risks[picked],
                           policy.spectrum(drugs[picked]), risks[picked] <= 1 - target, target,

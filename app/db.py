@@ -65,6 +65,12 @@ patients = sa.Table(
     sa.Column("allergies", sa.JSON),             # allergy groups, keys of prechecks.ALLERGY_LABELS
     sa.Column("egfr", sa.Integer),               # kidney function; empty = not on record
     sa.Column("pregnancy", sa.String(32)),       # "Pregnant", "Not pregnant" or "Not applicable"
+    # Vital signs from the 48 hours before the culture; they set the severity level (policy.py).
+    # Empty = not recorded, which counts as not abnormal.
+    sa.Column("temperature_f", sa.Float),
+    sa.Column("heart_rate", sa.Integer),         # beats per minute
+    sa.Column("respiratory_rate", sa.Integer),   # breaths per minute
+    sa.Column("systolic_bp", sa.Integer),        # mmHg
 )
 
 clinician_patients = sa.Table(

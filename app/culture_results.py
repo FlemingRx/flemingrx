@@ -156,7 +156,7 @@ def prescription_comparison(case: dict):
         <div class="fx-compare">
           <div><span class="fx-eyebrow-dark">Initial model recommendation</span>
             <b>{html.escape(policy.drug_label(course["recommended_drug"]))}</b>
-            <small>Narrowest option that cleared a 90% chance of working</small></div>
+            <small>Narrowest option that cleared the bar for the patient's severity</small></div>
           <div><span class="fx-eyebrow-dark">Current prescription</span>
             <b>{html.escape(policy.drug_label(course["drug"]))}</b>
             <small>{html.escape(course["dose"])} · {html.escape(course["frequency"])} ·
