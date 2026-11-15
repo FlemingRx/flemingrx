@@ -18,7 +18,9 @@
 # MAGIC resistance isn't the same as what predicts ceftriaxone resistance.
 # MAGIC
 # MAGIC **How the data is split (by date, never shuffled):**
-# MAGIC - **Step A, choose the approach:** train on 2008-2020, compare on **2021**.
+# MAGIC - **Step A, choose the approach:** train on 2008-2020, compare on **2021**. This is also where
+# MAGIC   gradient boosting's settings are tuned, and where we check that labs and the newer features
+# MAGIC   are worth keeping.
 # MAGIC - **Step B, final score:** retrain the chosen approach on 2008-2021 and score it once on
 # MAGIC   **2022 onwards**, the test years nobody has looked at. This is the number for the pitch.
 # MAGIC
@@ -67,6 +69,27 @@ ANTIBIOGRAM_YEARS = 1
 #  2. Most outpatients have none (58% of rows have no labs), and the demo is simpler without them.
 # Section 4 measures how much they would add, so the team can make an informed call.
 USE_LABS_VITALS = False
+
+# Gradient-boosting settings to try in Step A. The best one on 2021 is used from then on.
+# The first is the setting used before tuning was added, so tuning can only match or beat it.
+#  - learning_rate: how big a step each new tree takes (smaller = slower but often more accurate)
+#  - max_leaf_nodes: how detailed each tree can be
+#  - min_samples_leaf: the fewest cultures a tree may base a decision on (higher = less overfitting)
+#  - l2_regularization: a brake on extreme predictions
+GB_CANDIDATES = [
+    {"learning_rate": 0.05, "max_leaf_nodes": 31, "min_samples_leaf": 50,  "l2_regularization": 1.0},
+    {"learning_rate": 0.05, "max_leaf_nodes": 15, "min_samples_leaf": 100, "l2_regularization": 1.0},
+    {"learning_rate": 0.05, "max_leaf_nodes": 63, "min_samples_leaf": 50,  "l2_regularization": 1.0},
+    {"learning_rate": 0.03, "max_leaf_nodes": 31, "min_samples_leaf": 100, "l2_regularization": 3.0},
+    {"learning_rate": 0.10, "max_leaf_nodes": 31, "min_samples_leaf": 50,  "l2_regularization": 1.0},
+    {"learning_rate": 0.05, "max_leaf_nodes": 31, "min_samples_leaf": 200, "l2_regularization": 10.0},
+]
+GB_PARAMS = dict(GB_CANDIDATES[0])   # replaced by the best candidate in section 4
+
+# Features added in the "model improvements" round. Section 4 measures what they add by training
+# once without them.
+NEW_FEATURE_PREFIXES = ("days_since_drug_", "days_since_subtype_", "days_since_resist_",
+                        "n_antibiotic_days_", "n_prior_cultures_", "comorb_", "n_comorbidities")
 
 MODEL_NAME = tbl("urine_resistance_model")
 EXPERIMENT_NAME = "flemingrx_urine_resistance"
@@ -117,10 +140,10 @@ def make_model(kind):
             LogisticRegression(max_iter=2000),
         )
     if kind == "gradient_boosting":
-        # handles missing values by itself; stops adding trees once a held-out 10% stops improving
+        # handles missing values by itself; stops adding trees once a held-out 10% stops improving.
+        # GB_PARAMS holds the tunable settings (see GB_CANDIDATES).
         return HistGradientBoostingClassifier(
-            learning_rate=0.05, max_iter=500, max_leaf_nodes=31, min_samples_leaf=50,
-            l2_regularization=1.0, early_stopping=True, validation_fraction=0.1,
+            **GB_PARAMS, max_iter=1000, early_stopping=True, validation_fraction=0.1,
             n_iter_no_change=30, random_state=SEED,
         )
     raise ValueError(kind)
@@ -223,11 +246,36 @@ print("Drugs:", ", ".join(DRUG_LABEL[d] for d in DRUGS))
 # MAGIC %md
 # MAGIC ## 4. Step A: choose the approach (train 2008-2020, compare on 2021)
 # MAGIC The test years (2022+) are not touched here.
+# MAGIC
+# MAGIC **First, tune gradient boosting.** Each setting in `GB_CANDIDATES` is trained on 2008-2020 and
+# MAGIC scored on 2021; the one with the highest average AUROC is kept for the rest of the notebook.
+# MAGIC Because this only looks at 2021, the test years still give an honest final score.
 
 # COMMAND ----------
 
 step_a_train = (~is_test) & (year < VALIDATION_YEAR)
 step_a_eval = (~is_test) & (year == VALIDATION_YEAR)
+
+tuning_rows = []
+for i, params in enumerate(GB_CANDIDATES):
+    GB_PARAMS = dict(params)
+    rows, _ = compare_models(X, y, drug, year, FEATURES, DRUGS, step_a_train, step_a_eval,
+                             ["gradient_boosting"])
+    scores = average_by_model(rows)[0]
+    tuning_rows.append({"setting": i, **params, "mean_auroc": scores["mean_auroc"],
+                        "mean_brier": scores["mean_brier"]})
+
+best_setting = max(tuning_rows, key=lambda r: r["mean_auroc"])["setting"]   # ties: earliest wins
+GB_PARAMS = dict(GB_CANDIDATES[best_setting])
+display(pd.DataFrame(tuning_rows))
+print(f"Chosen gradient-boosting setting {best_setting}: {GB_PARAMS}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **Then compare the four approaches** on 2021, with gradient boosting at its chosen setting.
+
+# COMMAND ----------
 
 val_rows, val_predictions = compare_models(X, y, drug, year, FEATURES, DRUGS, step_a_train,
                                            step_a_eval, BASELINES + ML_MODELS)
@@ -257,6 +305,31 @@ display(pd.DataFrame([
      "auroc_with_labs": r["auroc"], "gain": round(r["auroc"] - without[r["antibiotic"]], 3)}
     for r in with_rows
 ]))
+del X_with_labs   # free the memory; only needed for this comparison
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Do the new features help?
+# MAGIC Same comparison again: gradient boosting with and without the features added in the
+# MAGIC improvements round (specific drugs, antibiotic subtypes, "days since" timings, yearly counts and
+# MAGIC comorbidities; see `NEW_FEATURE_PREFIXES`). A positive gain on most drugs means they earn their
+# MAGIC place.
+
+# COMMAND ----------
+
+OLD_FEATURES = [c for c in FEATURES if not c.startswith(NEW_FEATURE_PREFIXES)]
+old_idx = [FEATURES.index(c) for c in OLD_FEATURES]
+old_rows, _ = compare_models(X[:, old_idx], y, drug, year, OLD_FEATURES, DRUGS, step_a_train,
+                             step_a_eval, ["gradient_boosting"])
+with_new = {r["antibiotic"]: r["auroc"] for r in val_rows if r["model"] == "gradient_boosting"}
+print(f"{len(FEATURES) - len(OLD_FEATURES)} new features ({len(OLD_FEATURES)} before, {len(FEATURES)} now)")
+display(pd.DataFrame([
+    {"antibiotic": r["antibiotic"], "auroc_old_features": r["auroc"],
+     "auroc_with_new_features": with_new[r["antibiotic"]],
+     "gain": round(with_new[r["antibiotic"]] - r["auroc"], 3)}
+    for r in old_rows
+]))
 
 # COMMAND ----------
 
@@ -282,7 +355,9 @@ with mlflow.start_run(run_name=f"final_{BEST_MODEL}") as run:
         "chosen_model": BEST_MODEL, "use_labs_vitals": USE_LABS_VITALS,
         "n_features": len(FEATURES), "train_years": f"2008-{VALIDATION_YEAR}", "test_years": "2022+",
         "antibiogram_years": ANTIBIOGRAM_YEARS,
+        **{f"gb_{k}": v for k, v in GB_PARAMS.items()},
     })
+    mlflow.log_table(pd.DataFrame(tuning_rows), artifact_file="gb_tuning_2021.json")
     for r in test_rows:
         for metric in ("auroc", "auprc", "brier"):
             if not np.isnan(r[metric]):

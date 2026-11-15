@@ -20,6 +20,10 @@
 # MAGIC - **Broad-spectrum use:** how often piperacillin/tazobactam or meropenem was recommended. Lower is
 # MAGIC   better for resistance.
 # MAGIC
+# MAGIC We also report **carbapenem use** (meropenem) on its own. It's part of "broad", but it's the
+# MAGIC last-resort drug, so a policy that cuts piperacillin/tazobactam by switching some patients to
+# MAGIC meropenem should be shown plainly rather than hidden inside one "broad" number.
+# MAGIC
 # MAGIC **The headline:** at the **same failure rate** as the antibiogram, how much less broad-spectrum
 # MAGIC antibiotic does the model need?
 # MAGIC
@@ -53,6 +57,9 @@ TARGET_SUCCESS = 0.90
 # Spectrum groups used for reporting (the drugs are ranked narrowest -> broadest in notebook 02)
 NARROW_DRUGS = ["nitrofurantoin", "trimethoprim_sulfamethoxazole", "cefazolin"]
 BROAD_DRUGS = ["piperacillin_tazobactam", "meropenem"]
+# Carbapenems are the last-resort drugs stewardship teams most want to protect, so their share is
+# reported on its own as well as inside "broad".
+CARBAPENEM_DRUGS = ["meropenem"]
 
 EXPERIMENT_NAME = "flemingrx_urine_resistance"   # same MLflow experiment as notebook 03
 
@@ -85,6 +92,7 @@ def policy_outcomes(choice, R, drugs):
         "failure_pct": round(100 * float(failed.mean()), 2),
         "narrow_pct": round(100 * float(np.isin(picked, NARROW_DRUGS).mean()), 1),
         "broad_pct": round(100 * float(np.isin(picked, BROAD_DRUGS).mean()), 1),
+        "carbapenem_pct": round(100 * float(np.isin(picked, CARBAPENEM_DRUGS).mean()), 1),
     }
 
 
@@ -240,7 +248,9 @@ else:
         f"recommendation failed for {matched_out['failure_pct']}% of test patients versus "
         f"{baseline['failure_pct']}% for the antibiogram, while recommending a broad-spectrum "
         f"antibiotic for {matched_out['broad_pct']}% of patients instead of {baseline['broad_pct']}%, "
-        f"and a narrow-spectrum one for {matched_out['narrow_pct']}% instead of {baseline['narrow_pct']}%."
+        f"and a narrow-spectrum one for {matched_out['narrow_pct']}% instead of {baseline['narrow_pct']}%. "
+        f"Within broad-spectrum, it recommended a carbapenem (meropenem) for "
+        f"{matched_out['carbapenem_pct']}% of patients versus {baseline['carbapenem_pct']}% for the antibiogram."
     )
     print(HEADLINE)
 
@@ -402,7 +412,8 @@ mlflow.set_experiment(f"/Users/{user}/{EXPERIMENT_NAME}")
 with mlflow.start_run(run_name="recommendation_policy"):
     mlflow.log_params({"target_success": TARGET_SUCCESS, "test_cultures": len(R),
                        "validation_cultures": len(R_val),
-                       "narrow_drugs": ",".join(NARROW_DRUGS), "broad_drugs": ",".join(BROAD_DRUGS)})
+                       "narrow_drugs": ",".join(NARROW_DRUGS), "broad_drugs": ",".join(BROAD_DRUGS),
+                       "carbapenem_drugs": ",".join(CARBAPENEM_DRUGS)})
     for name, out in [("antibiogram", baseline), ("model_at_target", policy_outcomes(choice_model, R, DRUGS)),
                       ("antibiogram_validation", baseline_val)]:
         for k, v in out.items():

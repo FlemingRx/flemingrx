@@ -7,6 +7,7 @@ Databricks-only pieces for local stand-ins:
   - `dbutils`    -> only `dbutils.fs.ls` (lists a local folder)
   - `display`    -> prints the first rows as a text table
   - `RAW_DIR`    -> points at the local folder of CSVs
+  - `COMORBIDITY_DIR` -> the `comorbidity` folder inside it (notebook 01b)
   - `CREATE VOLUME` statements are skipped (volumes only exist on Databricks)
 
 A notebook that passes here will very likely work on Databricks, but it isn't a
@@ -29,6 +30,7 @@ class _FileInfo:
     def __init__(self, path: pathlib.Path):
         self.path = path.as_posix()
         self.name = path.name
+        self.size = path.stat().st_size
 
 
 class _LocalFS:
@@ -154,6 +156,8 @@ def main():
     started = time.time()
     for number, title, code in notebook_cells(source):
         code = re.sub(r"^RAW_DIR\s*=.*$", f"RAW_DIR = {data_dir.as_posix()!r}", code, flags=re.MULTILINE)
+        code = re.sub(r"^COMORBIDITY_DIR\s*=.*$", f"COMORBIDITY_DIR = {(data_dir / 'comorbidity').as_posix()!r}",
+                      code, flags=re.MULTILINE)
         print(f"\n===== cell {number}: {title} =====", flush=True)
         cell_start = time.time()
         exec(compile(code, f"{notebook.name} [cell {number}]", "exec"), namespace)
