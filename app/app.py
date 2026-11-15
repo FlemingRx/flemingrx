@@ -13,11 +13,8 @@ The look lives in three places: .streamlit/config.toml (brand colours and fonts)
 
 import base64
 import html
-import os
 import pathlib
 
-import altair as alt
-import pandas as pd
 import streamlit as st
 
 import analytics
@@ -35,7 +32,6 @@ LOGO = HERE / "assets" / "flemingrx-logo.png"
 LOGO_LIGHT = HERE / "assets" / "flemingrx-logo-light.png"   # white wordmark, for the navy sidebar
 MARK = HERE / "assets" / "flemingrx-mark.png"
 
-NAVY, TEAL = "#132557", "#009788"
 
 st.set_page_config(page_title="FlemingRx · Antibiotic stewardship", page_icon=str(MARK),
                    layout="wide", initial_sidebar_state="auto")
@@ -50,11 +46,6 @@ def get_model():
 @st.cache_resource(show_spinner="Loading...")
 def get_severity_bars() -> tuple[dict, str]:
     return data.severity_bars()
-
-
-@st.cache_data(show_spinner="Loading...")
-def get_table(name: str) -> pd.DataFrame:
-    return data.load_table(name)
 
 
 @st.cache_resource(show_spinner="Connecting...")
@@ -330,87 +321,6 @@ def recommendation_panel(model, features, clinician: dict, record: dict):
 
         with card("ladder", "stairs", "Every option, narrowest first", "predicted chance of working"):
             st.html(ladder_html(drugs, risks, picked, target))
-    return target
-
-
-# ----------------------------------------------------------------------------- other tabs
-
-def evidence_tab(target: float):
-    try:
-        tradeoff = get_table("gold_policy_tradeoff")
-    except Exception as error:   # shown to the user: the app still works without this table
-        st.info(f"The evaluation results aren't available here, so this page is empty. ({error})",
-                icon=":material/info:")
-        return
-    tradeoff = tradeoff.replace({"policy": {"model": "Model (FlemingRx)",
-                                            "antibiogram": "Antibiogram (today)"}})
-    model_rows = tradeoff[tradeoff["policy"] == "Model (FlemingRx)"]
-    here = model_rows.iloc[(model_rows["target_success"] - target).abs().argsort()[:1]]
-
-    chart_col, side_col = st.columns([7, 3], gap="medium")
-    with chart_col, card("chart", "show_chart", "How the rule performed on cultures the model never saw"):
-        # The model gives a smooth curve. The antibiogram gives everyone the same drug, so it only
-        # has a few distinct outcomes: show those as separate dots rather than joining them up.
-        colors = alt.Scale(domain=["Model (FlemingRx)", "Antibiogram (today)"], range=[TEAL, NAVY])
-        base = alt.Chart(tradeoff).encode(
-            x=alt.X("broad_pct", title="Patients given a broad-spectrum antibiotic (%)"),
-            y=alt.Y("failure_pct", title="Recommended antibiotic failed (%)"),
-            color=alt.Color("policy", title=None, scale=colors,
-                            legend=alt.Legend(orient="top", labelFontSize=12, symbolSize=120)),
-            tooltip=[alt.Tooltip("policy", title="Policy"),
-                     alt.Tooltip("target_success", title="Bar", format=".1%"),
-                     alt.Tooltip("failure_pct", title="Failed (%)"),
-                     alt.Tooltip("broad_pct", title="Broad (%)"),
-                     alt.Tooltip("narrow_pct", title="Narrow (%)")],
-        )
-        is_model = alt.datum.policy == "Model (FlemingRx)"
-        you = alt.Chart(here).mark_point(size=420, shape="circle", filled=False, strokeWidth=2.5,
-                                         color=NAVY).encode(x="broad_pct", y="failure_pct")
-        chart = (base.transform_filter(is_model).mark_line(point=alt.OverlayMarkDef(size=28),
-                                                             strokeWidth=2.5)
-                 + base.transform_filter(~is_model).mark_point(size=170, filled=True, opacity=0.9)
-                 + you).properties(height=380)
-        chart = chart.configure_axis(gridColor="#EDF1F6", domainColor="#D5DCE6", tickColor="#D5DCE6",
-                                     labelColor="#5B6782", titleColor="#3A4560", titleFontWeight=600,
-                                     labelFont="Inter", titleFont="Inter").configure_view(strokeWidth=0).configure(background="#FFFFFF")
-        st.altair_chart(chart, width="stretch")
-        st.caption("Each point is one setting of the rule on the 2022+ test cultures. Down and to the "
-                   "left is better: fewer failures and less broad-spectrum use. The antibiogram gives "
-                   "every patient the same drug, so it has only a few possible outcomes. From notebook 04.")
-    with side_col:
-        row = here.iloc[0]
-        with card("atbar", "my_location", "At your bar"):
-            st.caption(f"The ringed point: the model with a {row['target_success']:.1%} bar, "
-                       f"set on the Recommend tab.")
-            st.metric("Recommended antibiotic failed", f"{row['failure_pct']:.1f}%")
-            st.metric("Given a broad-spectrum antibiotic", f"{row['broad_pct']:.1f}%")
-            st.metric("Given a narrow-spectrum antibiotic", f"{row['narrow_pct']:.1f}%")
-
-
-LIMITS = [
-    ("stethoscope", "Decision support, not a prescription",
-     "A clinician makes the choice. The tool shows how likely each option is to work."),
-    ("rule", "It only predicts resistance",
-     "The model does not know about allergies, pregnancy, kidney function or symptoms. The "
-     "pre-checks above the recommendation flag those from the patient record with a few simple "
-     "rules; drug interactions and the site and severity of infection are not checked at all."),
-    ("location_city", "7 antibiotics, one health system",
-     "Trained on positive urine cultures from one health system, 2008 onwards. Other hospitals "
-     "will have different resistance patterns."),
-    ("filter_alt", "Scored on fully tested cultures",
-     "Only cultures where the lab tested all 7 antibiotics were scored. Those left out tend to grow "
-     "more resistant organisms, so real failure rates may be higher (notebook 04, section 6)."),
-    ("database", "Patients are fabricated",
-     "Patient details come from the app's own database of made-up demo patients. Reading them "
-     "from a hospital's records is planned, not built."),
-]
-
-
-def limits_tab():
-    columns = st.columns(2, gap="medium")
-    for index, (icon, title, body) in enumerate(LIMITS):
-        with columns[index % 2], card(f"limit{index}", icon, title):
-            st.write(body)
 
 
 # ----------------------------------------------------------------------------- screens
@@ -438,23 +348,15 @@ def patient_assessment(clinician: dict, record: dict):
         st.caption("Running locally? Install the requirements first: pip install -r app/requirements.txt")
         return
 
-    recommend_tab, evidence, limits = st.tabs([":material/clinical_notes: Recommend",
-                                               ":material/insights: Evidence",
-                                               ":material/info: Limits"])
-    with recommend_tab:
-        record_column, result_column = st.columns([5, 7], gap="large")
-        with record_column:
-            st.html(f'<div class="fx-formhead"><div class="fx-title">'
-                    f'{html.escape(record["patient_number"])}</div>'
-                    f'<div class="fx-sub">Urinary tract infection. Details from the patient record.'
-                    f'</div></div>')
-            patient_record(record)
-        with result_column:
-            target = recommendation_panel(model, features, clinician, record)
-    with evidence:
-        evidence_tab(target)
-    with limits:
-        limits_tab()
+    record_column, result_column = st.columns([5, 7], gap="large")
+    with record_column:
+        st.html(f'<div class="fx-formhead"><div class="fx-title">'
+                f'{html.escape(record["patient_number"])}</div>'
+                f'<div class="fx-sub">Urinary tract infection. Details from the patient record.'
+                f'</div></div>')
+        patient_record(record)
+    with result_column:
+        recommendation_panel(model, features, clinician, record)
 
 
 def sign_in_page():

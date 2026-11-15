@@ -1,14 +1,17 @@
 # scikit-learn must be the version the registered model was trained with, or the model won't
 # load. To check it: Catalog -> workspace -> armd -> Models -> urine_resistance_model -> Artifacts
 # -> requirements.txt. Change the pin below if a later training run uses a different version.
-streamlit>=1.50
-mlflow
+# The other versions are the ones the app was built and tested with. Databricks Apps comes with an
+# older Streamlit that this app does not work on, so these are pinned rather than left open.
+streamlit==1.67.0
+altair==6.3.0
+mlflow==3.18.0
 scikit-learn==1.7.2
-pandas
-numpy
-pyarrow
+pandas==3.1.1
+numpy==2.4.6
+pyarrow==26.0.1
 databricks-sdk>=0.81   # 0.81 is the first version that can ask Lakebase for a sign-in token
-databricks-sql-connector
+databricks-sql-connector==4.9.0
 certifi
-sqlalchemy>=2.0
-psycopg[binary]>=3.1   # Postgres (Lakebase) driver; not used when running on the local SQLite file
+sqlalchemy==2.1.8
+psycopg[binary]==3.3.9   # Postgres (Lakebase) driver
