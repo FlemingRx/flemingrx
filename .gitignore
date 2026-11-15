@@ -61,3 +61,5 @@ logs/
 *.zip
 *.parquet
 data/
+# the app's local demo database (rebuilt from app/seed.py)
+app/flemingrx.db

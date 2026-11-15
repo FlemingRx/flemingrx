@@ -7,6 +7,8 @@ scikit-learn==1.7.2
 pandas
 numpy
 pyarrow
-databricks-sdk
+databricks-sdk>=0.81   # 0.81 is the first version that can ask Lakebase for a sign-in token
 databricks-sql-connector
 certifi
+sqlalchemy>=2.0
+psycopg[binary]>=3.1   # Postgres (Lakebase) driver; not used when running on the local SQLite file

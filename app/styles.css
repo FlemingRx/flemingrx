@@ -112,7 +112,7 @@ button[data-variant="pills"][data-selected="true"] * { color: #fff !important; }
   color: var(--fx-teal-bright); }
 .fx-drug { font-family: "Plus Jakarta Sans", Inter, sans-serif; font-weight: 800;
   font-size: clamp(1.5rem, 2.6vw, 2.1rem); line-height: 1.15; margin: .2rem 0 .6rem;
-  letter-spacing: -.02em; overflow-wrap: anywhere; }
+  letter-spacing: -.02em; overflow-wrap: break-word; }
 .fx-tags { display: flex; flex-wrap: wrap; gap: .4rem; }
 .fx-tag { font-size: .74rem; font-weight: 600; padding: .22rem .6rem; border-radius: 0;
   background: rgba(255, 255, 255, .12); border: 1px solid rgba(255, 255, 255, .18); }
@@ -275,25 +275,7 @@ button[data-variant="pills"][data-selected="true"] * { color: #fff !important; }
 .fx-meter-track div { height: 100%; background: var(--fx-teal); }
 .fx-dnote { font-size: .72rem; color: var(--fx-muted); }
 
-/* the navy "start new assessment" card: one live button, the rest planned */
-.st-key-startcard { padding: 1rem; color: #fff; gap: .35rem !important; background: var(--fx-navy); }
-.fx-dhead-dark { margin-bottom: .3rem; }
-.fx-dhead-dark .fx-dtitle { color: #fff; }
-.fx-dhead-dark .fx-dicon { background: rgba(255, 255, 255, .12); color: #fff; }
-.st-key-start_uti button > div, .st-key-start_uti button > div > span { width: 100%; }
-.st-key-start_uti button > div > span { justify-content: space-between; flex-direction: row-reverse; }
-.st-key-start_uti button {
-  background: rgba(255, 255, 255, .12); border: 1px solid rgba(255, 255, 255, .28); color: #fff;
-  padding: .6rem .85rem; font-weight: 600; border-radius: 0; }
-.st-key-start_uti button:hover, .st-key-start_uti button:focus-visible {
-  background: var(--fx-teal); border-color: var(--fx-teal-bright); color: #fff; }
-.st-key-start_uti button p { font-weight: 600; font-size: .9rem; }
-.fx-planned { display: flex; align-items: center; justify-content: space-between; gap: .5rem;
-  padding: .6rem .85rem; border: 1px dashed rgba(255, 255, 255, .2);
-  margin-bottom: .35rem; font-size: .9rem; font-weight: 500; color: rgba(255, 255, 255, .55); }
-.fx-planned i { font-style: normal; font-size: .66rem; font-weight: 700; letter-spacing: .07em;
-  text-transform: uppercase; color: rgba(255, 255, 255, .5); }
-.fx-start-note { margin: .2rem 0 0; font-size: .76rem; line-height: 1.45; color: rgba(255, 255, 255, .62); }
+.fx-blank { min-height: 15rem; }
 
 .fx-empty { max-width: 560px; margin: 3rem auto; text-align: center; background: #fff;
   border: 1px dashed #cfd7e4; border-radius: 0; padding: 2.2rem 1.6rem; }
@@ -301,8 +283,34 @@ button[data-variant="pills"][data-selected="true"] * { color: #fff !important; }
 .fx-empty p { margin: 0; font-size: .9rem; line-height: 1.55; color: var(--fx-muted); }
 
 /* dashboard columns: wrap instead of squeezing on mid-width screens */
-[data-testid="stHorizontalBlock"]:has(.st-key-startcard) { flex-wrap: wrap; }
-[data-testid="stHorizontalBlock"]:has(.st-key-startcard) > [data-testid="stColumn"] { min-width: 290px; }
+.st-key-dash [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+.st-key-dash [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { min-width: 290px; }
 .stApp:has([data-testid="stExpandSidebarButton"]) [data-testid="stMainBlockContainer"] { padding-top: 3.4rem; }
-[data-testid="stHorizontalBlock"]:has(.st-key-startcard) > [data-testid="stColumn"] > [data-testid="stVerticalBlock"] { gap: .5rem; }
+.st-key-dash [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] > [data-testid="stVerticalBlock"] { gap: .5rem; }
 button[data-variant="pills"] { border-radius: 0 !important; }
+
+/* ---------- sign-in ---------- */
+.st-key-card_signin { margin-top: 16vh; padding: 2rem 1.75rem 1.5rem !important; }
+.fx-signin-head { display: flex; flex-direction: column; align-items: center; gap: 1.1rem; margin-bottom: .3rem; }
+.fx-signin-head img { height: 40px; width: auto; }
+.st-key-card_signin [data-testid="stFormSubmitButton"] button { background: var(--fx-navy); border-color: var(--fx-navy); margin-top: .4rem; }
+.st-key-card_signin [data-testid="stFormSubmitButton"] button:hover { background: var(--fx-teal); border-color: var(--fx-teal); }
+.st-key-signout button { background: transparent; border: 1px solid rgba(255, 255, 255, .28); color: #fff; }
+.st-key-signout button:hover { background: rgba(255, 255, 255, .1); border-color: #fff; color: #fff; }
+
+/* ---------- patient list: one full-width row per patient, number first ---------- */
+.st-key-patientlist { gap: .35rem !important; max-width: 760px; }
+.st-key-patientlist button { background: #fff; border: 1px solid var(--fx-line); padding: .7rem .9rem; }
+.st-key-patientlist button:hover { border-color: var(--fx-teal); background: var(--fx-teal-soft); color: var(--fx-ink); }
+.st-key-patientlist button > div, .st-key-patientlist button > div > span { width: 100%; }
+.st-key-patientlist button > div > span { justify-content: space-between; flex-direction: row-reverse; }
+.st-key-patientlist button p { text-align: left; font-size: .84rem; }
+.st-key-patientlist button p strong { color: var(--fx-navy); font-size: .92rem; margin-right: .9rem;
+  font-variant-numeric: tabular-nums; }
+
+/* ---------- read-only patient record rows ---------- */
+.fx-kv { display: flex; justify-content: space-between; gap: 1rem; padding: .5rem 0;
+  border-bottom: 1px solid var(--fx-line); font-size: .86rem; }
+.fx-kv:last-child { border-bottom: 0; padding-bottom: 0; }
+.fx-kv span { color: var(--fx-muted); flex: none; max-width: 55%; }
+.fx-kv b { color: var(--fx-ink); font-weight: 600; text-align: right; }

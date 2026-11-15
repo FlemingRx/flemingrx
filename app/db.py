@@ -1,0 +1,210 @@
+"""The database: clinicians, patients, and which clinician looks after which patient.
+
+Three tables:
+  clinicians          one row per login (the password is stored as a salted hash, never as text)
+  patients            one row per patient, holding the details the model needs
+  clinician_patients  one row per (clinician, patient) pair, so a patient can have several clinicians
+
+Where the database lives:
+  Databricks Lakebase (Postgres), by default, both deployed and on a laptop. There is no stored
+      password: each new connection signs in with a short-lived token from Databricks. The compute
+      to use is ENDPOINT_NAME (default below). A deployed Databricks App with a database resource
+      is given PGHOST and PGUSER; on a laptop they are looked up with your Databricks CLI sign-in.
+  DATABASE_URL, if set, is used instead: postgresql://user:password@host:5432/dbname for another
+      Postgres, or sqlite:///flemingrx.db for a file on this machine with no Databricks needed.
+The same code runs on all of them. The first time it finds an empty database it creates the tables
+and fills them with the fabricated demo data in seed.py.
+"""
+
+import functools
+import hashlib
+import hmac
+import os
+import secrets
+
+import sqlalchemy as sa
+
+metadata = sa.MetaData()
+
+clinicians = sa.Table(
+    "clinicians", metadata,
+    sa.Column("id", sa.Integer, primary_key=True),
+    sa.Column("username", sa.String(64), nullable=False, unique=True),
+    sa.Column("name", sa.String(120), nullable=False),
+    sa.Column("role", sa.String(120), nullable=False),
+    sa.Column("password_hash", sa.String(255), nullable=False),
+)
+
+# The patient columns are the details the assessment used to ask for in a form. The four list
+# columns hold short names that match the model's features, e.g. "ciprofloxacin", "klebsiella".
+patients = sa.Table(
+    "patients", metadata,
+    sa.Column("id", sa.Integer, primary_key=True),
+    sa.Column("patient_number", sa.String(32), nullable=False, unique=True),
+    sa.Column("age_band", sa.String(16), nullable=False),            # a key of data.AGE_BANDS
+    sa.Column("sex", sa.String(16), nullable=False),                 # a key of data.SEX_CODES
+    sa.Column("care_setting", sa.String(64), nullable=False),        # a key of data.SETTINGS
+    sa.Column("nursing_home", sa.Boolean, nullable=False, default=False),
+    sa.Column("resistant_to", sa.JSON, nullable=False, default=list),          # past 12 months
+    sa.Column("other_resistant_count", sa.Integer, nullable=False, default=0),
+    sa.Column("recent_antibiotic_classes", sa.JSON, nullable=False, default=list),   # last 90 days
+    sa.Column("days_since_last_antibiotic", sa.Integer, nullable=False, default=366),
+    sa.Column("prior_organisms", sa.JSON, nullable=False, default=list),       # past year
+    sa.Column("recent_procedures", sa.JSON, nullable=False, default=list),     # last 90 days
+)
+
+clinician_patients = sa.Table(
+    "clinician_patients", metadata,
+    sa.Column("clinician_id", sa.ForeignKey("clinicians.id", ondelete="CASCADE"), primary_key=True),
+    sa.Column("patient_id", sa.ForeignKey("patients.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+# ----------------------------------------------------------------------------- connection
+
+# On Lakebase the tables go in a schema of their own. The app's login is allowed to create
+# schemas in the database, but not necessarily tables in the shared "public" one.
+LAKEBASE_SCHEMA = os.getenv("FLEMINGRX_DB_SCHEMA", "flemingrx")
+
+
+# The Lakebase compute this project uses (Lakebase app -> branch -> Computes -> Get ID).
+DEFAULT_ENDPOINT = "projects/flemingrx/branches/production/endpoints/primary"
+
+
+def endpoint_name() -> str:
+    return os.getenv("ENDPOINT_NAME") or DEFAULT_ENDPOINT
+
+
+def on_lakebase() -> bool:
+    return not os.getenv("DATABASE_URL")
+
+
+def _workspace():
+    from databricks.sdk import WorkspaceClient
+    return WorkspaceClient()
+
+
+def _lakebase_host_and_user() -> tuple[str, str]:
+    """Where to connect and who as: given to a deployed app, looked up from Databricks on a laptop."""
+    host, user = os.getenv("PGHOST"), os.getenv("PGUSER")
+    if not host:
+        host = _workspace().postgres.get_endpoint(name=endpoint_name()).status.hosts.host
+    if not user:
+        user = _workspace().current_user.me().user_name
+    return host, user
+
+
+def database_url() -> sa.URL | str:
+    url = os.getenv("DATABASE_URL")
+    if url:
+        # Hosting services hand out postgres:// or postgresql:// addresses; name the driver we install.
+        for prefix in ("postgres://", "postgresql://"):
+            if url.startswith(prefix):
+                return "postgresql+psycopg://" + url[len(prefix):]
+        return url
+    host, user = _lakebase_host_and_user()
+    return sa.URL.create(
+        "postgresql+psycopg", username=user, host=host, port=int(os.getenv("PGPORT", "5432")),
+        database=os.getenv("PGDATABASE", "databricks_postgres"),
+        query={"sslmode": os.getenv("PGSSLMODE", "require"),
+               "options": f"-csearch_path={LAKEBASE_SCHEMA}"})
+
+
+def database_kind() -> str:
+    """Which database is in use, for showing in the app."""
+    if on_lakebase():
+        return "Databricks Lakebase (Postgres)"
+    return "SQLite (local file)" if os.environ["DATABASE_URL"].startswith("sqlite") else "Postgres"
+
+
+def _lakebase_token() -> str:
+    """A fresh sign-in token for Lakebase. They last an hour, so each new connection asks for one."""
+    return _workspace().postgres.generate_database_credential(endpoint=endpoint_name()).token
+
+
+@functools.lru_cache(maxsize=None)
+def engine(url: str | None = None) -> sa.Engine:
+    if url or not on_lakebase():
+        return sa.create_engine(url or database_url(), pool_pre_ping=True)
+
+    # Drop pooled connections before their token's hour is up, and sign each new one in afresh.
+    db = sa.create_engine(database_url(), pool_pre_ping=True, pool_recycle=45 * 60)
+
+    @sa.event.listens_for(db, "do_connect")
+    def add_token(dialect, connection_record, connection_args, connection_kwargs):
+        connection_kwargs["password"] = _lakebase_token()
+
+    return db
+
+
+def init(url: str | None = None) -> None:
+    """Create the tables if they are missing, and add the demo data if there are no clinicians."""
+    import seed
+
+    db = engine(url)
+    if not url and on_lakebase():
+        with db.begin() as connection:
+            connection.execute(sa.text(f'CREATE SCHEMA IF NOT EXISTS "{LAKEBASE_SCHEMA}"'))
+    metadata.create_all(db)
+    with db.begin() as connection:
+        if connection.execute(sa.select(sa.func.count()).select_from(clinicians)).scalar() == 0:
+            seed.load(connection)
+
+
+# ----------------------------------------------------------------------------- passwords
+
+def hash_password(password: str) -> str:
+    """A salted scrypt hash, stored as "scrypt$<salt>$<hash>"."""
+    salt = secrets.token_bytes(16)
+    return f"scrypt${salt.hex()}${_scrypt(password, salt).hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        scheme, salt, expected = stored.split("$")
+        return scheme == "scrypt" and hmac.compare_digest(
+            _scrypt(password, bytes.fromhex(salt)), bytes.fromhex(expected))
+    except ValueError:      # not a hash we wrote
+        return False
+
+
+def _scrypt(password: str, salt: bytes) -> bytes:
+    return hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+
+
+_NO_SUCH_USER = hash_password(secrets.token_hex(16))   # checked when the username is unknown
+
+
+# ----------------------------------------------------------------------------- questions
+
+def sign_in(username: str, password: str, url: str | None = None) -> dict | None:
+    """The clinician (id, username, name, role) if the username and password match, else None."""
+    with engine(url).connect() as connection:
+        row = connection.execute(
+            sa.select(clinicians).where(clinicians.c.username == username.strip().lower())
+        ).mappings().first()
+    # Check a hash even for an unknown username, so both failures take the same time.
+    if not verify_password(password, row["password_hash"] if row else _NO_SUCH_USER) or not row:
+        return None
+    return {key: row[key] for key in ("id", "username", "name", "role")}
+
+
+def patients_for(clinician_id: int, url: str | None = None) -> list[dict]:
+    """The patients assigned to this clinician, in patient-number order."""
+    query = (sa.select(patients)
+             .join(clinician_patients, clinician_patients.c.patient_id == patients.c.id)
+             .where(clinician_patients.c.clinician_id == clinician_id)
+             .order_by(patients.c.patient_number))
+    with engine(url).connect() as connection:
+        return [dict(row) for row in connection.execute(query).mappings()]
+
+
+def patient_for(clinician_id: int, patient_number: str, url: str | None = None) -> dict | None:
+    """One patient, but only if they are assigned to this clinician."""
+    query = (sa.select(patients)
+             .join(clinician_patients, clinician_patients.c.patient_id == patients.c.id)
+             .where(clinician_patients.c.clinician_id == clinician_id,
+                    patients.c.patient_number == patient_number))
+    with engine(url).connect() as connection:
+        row = connection.execute(query).mappings().first()
+    return dict(row) if row else None

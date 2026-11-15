@@ -3,13 +3,15 @@
 A Streamlit app for clinicians managing antibiotics for urine infections, using the model
 registered by `notebooks/03_train.py`.
 
-Screens, from the sidebar:
+Each clinician signs in with their own username and password and sees only the patients
+assigned to them. Screens, from the sidebar:
 
 - **Dashboard**: the landing page. Today's worklist, cases needing attention, recent activity,
-  pending cultures, and the button that starts an assessment. It shows sample data for now
-  (written out at the top of `dashboard.py`); there is no patient database yet.
-- **Clinical Assessment**: a short form, each antibiotic's predicted chance of working, and the
-  pick. Its **Evidence** tab has the trade-off chart from `notebooks/04_recommend.py` and its
+  and pending cultures. Apart from the clinician's name it shows sample data for now (written
+  out at the top of `dashboard.py`).
+- **Clinical Assessment**: opens on the list of the clinician's patients. Selecting one shows
+  their details from the database, each antibiotic's predicted chance of working, and the pick.
+  Its **Evidence** tab has the trade-off chart from `notebooks/04_recommend.py` and its
   **Limits** tab says what the tool does not do.
 - **Coming next**: Patient Encounters, Culture Results, Follow-up and Stewardship Analytics are
   placeholders that say what each will hold.
@@ -18,16 +20,63 @@ Screens, from the sidebar:
 
 | File | What it does |
 |---|---|
-| `app.py` | The frame around every screen (sidebar, top bar) and the clinical assessment. |
+| `app.py` | The frame around every screen (sign-in, sidebar, top bar) and the clinical assessment. |
 | `dashboard.py` | The dashboard and its sample data. |
 | `policy.py` | The recommendation rule: the narrowest antibiotic that clears the bar. |
-| `data.py` | Loads the model and tables; turns patient details into model features. |
+| `data.py` | Loads the model and tables; turns a patient's database row into model features. |
+| `db.py` | The database: clinicians, patients, who looks after whom, and password checking. |
+| `seed.py` | The fabricated demo clinicians and patients, loaded into an empty database. |
 | `app.yaml` | Databricks Apps configuration. |
 | `styles.css`, `.streamlit/config.toml`, `assets/` | The FlemingRx look: brand colours and fonts, card and result-panel styling, the logo. |
 
-Everything works from one `patient` dict of `{feature name: number}`. Today the form fills it in.
-Reading a patient from medical records later means adding one function in `data.py` that returns
-the same dict; nothing else has to change.
+Everything works from one `patient` dict of `{feature name: number}`, built by
+`data.patient_features` from the patient's row in the database. Reading patients from a hospital's
+records instead means filling the `patients` table from them; nothing else has to change.
+
+## The database
+
+Three tables (defined in `db.py`):
+
+| Table | What it holds |
+|---|---|
+| `clinicians` | One row per login: username, name, role, and a salted hash of the password. |
+| `patients` | One row per patient: patient number and the details the model uses (age band, sex, care setting, nursing home contact, resistance history, antibiotic exposure, earlier organisms, procedures). |
+| `clinician_patients` | One row per clinician and patient pair, so a patient can have several clinicians. |
+
+The app uses Lakebase (Databricks' managed Postgres), both deployed and on a laptop. The workspace
+has a Lakebase project for this, `flemingrx`, holding the tables and demo data in a schema called
+`flemingrx`. There is no stored database password: each new connection signs in with a one-hour
+token the app asks Databricks for.
+
+- **On a laptop** this needs the Databricks CLI signed in (`databricks auth login`) with an
+  account that can use the project. Nothing else has to be set.
+- **Without Databricks**, set `DATABASE_URL=sqlite:///flemingrx.db` to use a file on your machine
+  instead (git-ignored, created and filled with the demo data on first start).
+- **Any other Postgres**: set `DATABASE_URL` (`postgresql://user:password@host:5432/dbname`).
+- A different Lakebase compute: set `ENDPOINT_NAME` to its resource name (default in `db.py`).
+
+When deploying as a Databricks App:
+
+1. Add the `flemingrx` project's database to the app as a **Database** resource. This creates a
+   Postgres login for the app and sets `PGHOST`, `PGUSER` and the other `PG*` settings for it.
+2. The tables were created from a laptop, so they belong to that person's login, not the app's.
+   Give the app access by running this in the Lakebase SQL editor, with the app's service
+   principal client ID in place of `<client-id>`:
+
+   ```sql
+   GRANT USAGE ON SCHEMA flemingrx TO "<client-id>";
+   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA flemingrx TO "<client-id>";
+   GRANT USAGE ON ALL SEQUENCES IN SCHEMA flemingrx TO "<client-id>";
+   ```
+
+Creating the tables, loading the demo data, signing in and reading a clinician's patients have
+been run against Lakebase from a laptop. Running as a deployed Databricks App has not.
+
+The first time the app finds an empty database it creates the tables and loads the fabricated
+clinicians and patients from `seed.py`. The demo sign-in details are in that file. To reload
+after editing it, empty the tables and start the app again.
+
+Signing in lasts for the browser session: reloading the page signs you out.
 
 `tests/test_policy.py` checks that `policy.recommend` gives the same picks as the `recommend`
 function in notebook 04, so the app applies the rule that was evaluated.

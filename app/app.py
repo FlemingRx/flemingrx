@@ -1,8 +1,9 @@
 """FlemingRx: an antibiotic stewardship platform for clinicians.
 
-This file is the frame around every screen (sidebar, top bar, footer) and holds the clinical
-assessment screen: patient details in, a recommended antibiotic out. The dashboard is in
-dashboard.py. Screens that are planned but not built yet are listed in PLANNED below.
+This file is the frame around every screen (sign-in, sidebar, top bar, footer) and holds the
+clinical assessment: the signed-in clinician's patients, and for each one a recommended antibiotic.
+The dashboard is in dashboard.py, the database in db.py. Screens that are planned but not built
+yet are listed in PLANNED below.
 
 Run locally with `streamlit run app.py` from this folder (see README.md for the two settings a
 local run needs). On Databricks it runs as a Databricks App using app.yaml.
@@ -22,6 +23,7 @@ import streamlit as st
 
 import dashboard
 import data
+import db
 import policy
 
 HERE = pathlib.Path(__file__).parent
@@ -44,6 +46,12 @@ def get_model():
 @st.cache_data(show_spinner="Loading the evaluation results...")
 def get_table(name: str) -> pd.DataFrame:
     return data.load_table(name)
+
+
+@st.cache_resource(show_spinner="Connecting to the database...")
+def database_ready() -> bool:
+    db.init()
+    return True
 
 
 @st.cache_data
@@ -81,67 +89,68 @@ def top_bar(page_title: str, sample_data: bool):
 SPECTRUM_CLASS = {"Narrow": "narrow", "Medium": "medium", "Broad": "broad"}
 
 
-# ----------------------------------------------------------------------------- patient form
+# ----------------------------------------------------------------------------- patients
 
-def patient_form(features) -> dict:
-    """The short form. Returns the patient as {feature name: number}, the model's input."""
-    patient = data.blank_patient(features)
+def last_antibiotic_text(days: int) -> str:
+    if days >= data.NO_RECENT_ANTIBIOTIC:
+        return "None in the past year"
+    return f"About {days} days ago"
 
-    with card("demo", "person", "Demographics"):
-        age = st.select_slider("Age", list(data.AGE_BANDS), value="65-74", key="age")
-        sex = st.segmented_control("Biological sex", list(data.SEX_CODES), default="Female",
-                                   required=True, key="sex", width="stretch")
-    patient["age_min"] = float(data.AGE_BANDS[age])
-    patient["gender"] = float(data.SEX_CODES[sex])
 
-    with card("setting", "local_hospital", "Care setting"):
-        setting = st.pills("Where the culture was ordered", list(data.SETTINGS),
-                           default="Outpatient clinic", required=True, key="setting")
-        nursing_home = st.toggle("Nursing home contact on record", key="nursing_home")
-    patient.update({name: float(value) for name, value in data.SETTINGS[setting].items()})
-    patient["nursing_home"] = float(nursing_home)
+def names(slugs, label=data.pretty) -> str:
+    return ", ".join(label(slug) for slug in slugs) or "None"
 
-    resistance = {policy.drug_label(name[len("prior_resist_"):]): name
-                  for name in features if name.startswith("prior_resist_")}
-    with card("resist", "coronavirus", "Resistance history", "past 12 months"):
-        past_resistance = st.pills(
-            "Earlier culture resistant to", list(resistance), selection_mode="multi",
-            key="past_resistance",
-            help="An earlier culture, at least 3 days old, that was resistant to this antibiotic.",
-        )
-        other_resistance = st.number_input(
-            "Other antibiotics with resistance (how many)", 0, 25, 0, key="other_resistance",
-            help="Antibiotics outside the 7 above that an earlier culture was resistant to.",
-        )
-    for label in past_resistance:
-        patient[resistance[label]] = 1.0
-    patient["n_prior_resistant_drugs"] = float(len(past_resistance) + other_resistance)
 
-    classes = data.options(features, "abx_class_", "_90d")
-    with card("abx", "medication", "Antibiotic exposure"):
-        recent_classes = st.multiselect("Classes taken in the last 90 days", list(classes),
-                                        placeholder="None selected", key="recent_classes")
-        last_options = {"Last month": 14, "1–3 months ago": 60}
-        if not recent_classes:
-            last_options.update({"3–12 months ago": 180, "None in past year": data.NO_RECENT_ANTIBIOTIC})
-        last = st.pills("Most recent antibiotic of any kind", list(last_options),
-                        default=list(last_options)[-1], required=True,
-                        key=f"last_abx_{len(last_options)}")
-    for label in recent_classes:
-        patient[classes[label]] = 1.0
-    patient["days_since_last_antibiotic"] = float(last_options[last])
+def patient_summary(record: dict) -> str:
+    """The one-line description under a patient number."""
+    parts = [record["age_band"], record["sex"], record["care_setting"]]
+    if record["resistant_to"]:
+        parts.append(f"{len(record['resistant_to'])} prior resistance")
+    return " · ".join(parts)
 
-    organisms = data.options(features, "prior_org_")
-    procedures = data.options(features, "proc_")
-    with card("micro", "biotech", "Microbiology & procedures"):
-        for label in st.multiselect("Organisms grown in the past year", list(organisms),
-                                    placeholder="None selected", key="organisms"):
-            patient[organisms[label]] = 1.0
-        for label in st.pills("Procedures in the last 90 days", list(procedures),
-                              selection_mode="multi", key="procedures"):
-            patient[procedures[label]] = 1.0
 
-    return patient
+def patient_list(clinician: dict):
+    records = db.patients_for(clinician["id"])
+    st.html(f'<div class="fx-formhead"><div class="fx-title">My patients</div>'
+            f'<div class="fx-sub">{len(records)} assigned to {html.escape(clinician["name"])}. '
+            f'Select a patient to open their assessment.</div></div>')
+    if not records:
+        st.info("No patients are assigned to you yet.", icon=":material/info:")
+        return
+    with st.container(key="patientlist"):
+        for record in records:
+            number = record["patient_number"]
+            if st.button(f"**{number}** :gray[{patient_summary(record)}]", key=f"open_{number}",
+                         icon=":material/chevron_right:", width="stretch"):
+                st.session_state["patient"] = number
+                st.rerun()
+
+
+def record_card(key: str, icon: str, title: str, rows: list, hint: str | None = None):
+    """A read-only card of (label, value) rows from the patient's record."""
+    body = "".join(f'<div class="fx-kv"><span>{html.escape(label)}</span>'
+                   f'<b>{html.escape(str(value))}</b></div>' for label, value in rows)
+    with card(key, icon, title, hint):
+        st.html(body)
+
+
+def patient_record(record: dict):
+    record_card("demo", "person", "Demographics",
+                [("Age", record["age_band"]), ("Biological sex", record["sex"])])
+    record_card("setting", "local_hospital", "Care setting",
+                [("Where the culture was ordered", record["care_setting"]),
+                 ("Nursing home contact on record", "Yes" if record["nursing_home"] else "No")])
+    record_card("resist", "coronavirus", "Resistance history",
+                [("Earlier culture resistant to", names(record["resistant_to"], policy.drug_label)),
+                 ("Other antibiotics with resistance", record["other_resistant_count"])],
+                "past 12 months")
+    record_card("abx", "medication", "Antibiotic exposure",
+                [("Classes taken in the last 90 days", names(record["recent_antibiotic_classes"])),
+                 ("Most recent antibiotic of any kind",
+                  last_antibiotic_text(record["days_since_last_antibiotic"]))])
+    record_card("micro", "biotech", "Microbiology & procedures",
+                [("Organisms grown in the past year", names(record["prior_organisms"])),
+                 ("Procedures in the last 90 days", names(record["recent_procedures"]))])
 
 
 # ----------------------------------------------------------------------------- result panel
@@ -154,7 +163,7 @@ def hero_html(drug: str, chance: float, spectrum: str, clears: bool, target: flo
     <div class="fx-hero">
       <div class="fx-hero-text">
         <div class="fx-eyebrow">Recommended empiric antibiotic</div>
-        <div class="fx-drug">{html.escape(drug)}</div>
+        <div class="fx-drug">{html.escape(drug).replace("/", "/<wbr>")}</div>
         <div class="fx-tags">
           <span class="fx-tag fx-spec-{SPECTRUM_CLASS[spectrum]}">{spectrum} spectrum</span>
           {status}
@@ -288,8 +297,9 @@ LIMITS = [
     ("filter_alt", "Scored on fully tested cultures",
      "Only cultures where the lab tested all 7 antibiotics were scored. Those left out tend to grow "
      "more resistant organisms, so real failure rates may be higher (notebook 04, section 6)."),
-    ("keyboard", "Details are typed in by hand",
-     "Reading the patient from medical records is planned, not built."),
+    ("database", "Patients are fabricated",
+     "Patient details come from the app's own database of made-up demo patients. Reading them "
+     "from a hospital's records is planned, not built."),
 ]
 
 
@@ -303,6 +313,20 @@ def limits_tab():
 # ----------------------------------------------------------------------------- screens
 
 def assessment_page():
+    clinician = st.session_state["clinician"]
+    number = st.session_state.get("patient")
+    # patient_for only returns patients assigned to this clinician, so nobody else's can be opened.
+    record = db.patient_for(clinician["id"], number) if number else None
+    if record is None:
+        patient_list(clinician)
+    else:
+        patient_assessment(record)
+
+
+def patient_assessment(record: dict):
+    if st.button("All patients", key="back", icon=":material/arrow_back:", type="tertiary"):
+        del st.session_state["patient"]
+        st.rerun()
     try:
         model, features = get_model()
     except Exception as error:   # shown to the user: nothing works without the model
@@ -315,25 +339,43 @@ def assessment_page():
                                                ":material/insights: Evidence",
                                                ":material/info: Limits"])
     with recommend_tab:
-        form_column, result_column = st.columns([5, 7], gap="large")
-        with form_column:
-            st.html('<div class="fx-formhead"><div class="fx-title">Patient details</div>'
-                    '<div class="fx-sub">Urinary tract infection. Enter risk factors; the estimate '
-                    'updates as you go.</div></div>')
-            patient = patient_form(features)
+        record_column, result_column = st.columns([5, 7], gap="large")
+        with record_column:
+            st.html(f'<div class="fx-formhead"><div class="fx-title">'
+                    f'{html.escape(record["patient_number"])}</div>'
+                    f'<div class="fx-sub">Urinary tract infection. Details from the patient record.'
+                    f'</div></div>')
+            patient_record(record)
         with result_column:
-            target = recommendation_panel(model, features, patient)
+            target = recommendation_panel(model, features, data.patient_features(features, record))
     with evidence:
         evidence_tab(target)
     with limits:
         limits_tab()
 
 
+def sign_in_page():
+    _, middle, _ = st.columns([1, 1, 1])
+    with middle, st.container(border=True, key="card_signin"):
+        st.html(f'<div class="fx-signin-head"><img src="{image_data_uri(LOGO)}" alt="FlemingRx" />'
+                f'<div class="fx-title">Log in</div></div>')
+        with st.form("signin", border=False):
+            username = st.text_input("User ID", autocomplete="username")
+            password = st.text_input("Password", type="password", autocomplete="current-password")
+            submitted = st.form_submit_button("Log in", type="primary", width="stretch")
+        if submitted:
+            clinician = db.sign_in(username, password)
+            if clinician:
+                st.session_state["clinician"] = clinician
+                st.rerun()
+            st.error("Incorrect credentials", icon=":material/lock:")
+
+
 # Screens from the roadmap that are not built yet: (title, address, icon, what it will hold).
 PLANNED = [
     ("Patient Encounters", "patients", "group",
-     "Each patient's history in one place: allergies, current medicines, kidney and liver "
-     "function, earlier infections, antibiotic exposure and past culture results."),
+     "Each patient's wider history in one place: allergies, current medicines, kidney and liver "
+     "function, earlier infections and past culture results."),
     ("Culture Results", "cultures", "biotech",
      "Urine culture and susceptibility results as they come back, with a flag when the empiric "
      "choice should be reconsidered or can be narrowed."),
@@ -358,24 +400,44 @@ def planned_page(icon: str, title: str, body: str):
 
 # ----------------------------------------------------------------------------- frame
 
+st.html(HERE / "styles.css")
+try:
+    database_ready()
+except Exception as error:   # shown to the user: nobody can sign in without the database
+    st.error(f"The database ({db.database_kind()}) could not be reached. {error}",
+             icon=":material/error:")
+    st.stop()
+
+if "clinician" not in st.session_state:
+    st.navigation([st.Page(sign_in_page, title="Log in")], position="hidden").run()
+    st.stop()
+
+clinician = st.session_state["clinician"]
 assessment = st.Page(assessment_page, title="Clinical Assessment", url_path="assessment",
                      icon=":material/clinical_notes:")
-home = st.Page(lambda: dashboard.render(assessment), title="Dashboard", url_path="dashboard",
+home = st.Page(lambda: dashboard.render(clinician), title="Dashboard", url_path="dashboard",
                icon=":material/dashboard:", default=True)
 planned = [st.Page(planned_page(icon, title, body), title=title, url_path=path,
                    icon=f":material/{icon}:") for title, path, icon, body in PLANNED]
 current = st.navigation({"Workspace": [home, assessment], "Coming next": planned})
+if current is not assessment:      # coming back to the assessment starts at the patient list
+    st.session_state.pop("patient", None)
 
-st.html(HERE / "styles.css")
 st.logo(str(LOGO_LIGHT), size="large", icon_image=str(MARK))
-st.sidebar.html('<div class="fx-sidenote"><b>Research demo</b>Built on de-identified data. '
-                'Not for clinical use.</div>')
-top_bar(current.title, sample_data=current is home)
+with st.sidebar:
+    st.html(f'<div class="fx-sidenote"><b>Signed in</b>{html.escape(clinician["name"])}<br>'
+            f'{html.escape(clinician["role"])}</div>')
+    if st.button("Log out", key="signout", icon=":material/logout:", width="stretch"):
+        st.session_state.clear()
+        st.rerun()
+    st.html('<div class="fx-sidenote"><b>Research demo</b>Fabricated patients. '
+            'Not for clinical use.</div>')
+top_bar(current.title, sample_data=current in (home, assessment))
 
 current.run()
 
 st.html(f"""<div class="fx-footer">
   <img src="{image_data_uri(MARK)}" alt="" />
-  <span>Research demo built on de-identified data. <b>Not for clinical use.</b></span>
-  <span class="fx-footer-src">Model: {html.escape(data.model_source())}</span>
+  <span>Research demo with fabricated patients. <b>Not for clinical use.</b></span>
+  <span class="fx-footer-src">Model: {html.escape(data.model_source())} · Database: {db.database_kind()}</span>
 </div>""")

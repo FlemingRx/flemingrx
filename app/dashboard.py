@@ -1,8 +1,9 @@
 """The clinician dashboard: the landing page of the platform.
 
-Everything shown here is SAMPLE DATA, written out below. There is no patient database yet; when
+Apart from the signed-in clinician's name, everything shown here is SAMPLE DATA, written out below
+(it is not yet read from the database in db.py). There is no patient database yet; when
 there is one, replace these constants with functions that read from it and leave `render` alone.
-The only live part is the "Start new assessment" card, which opens the UTI assessment.
+The blank card in the middle column is a placeholder for whatever goes there next.
 """
 
 import datetime
@@ -10,8 +11,7 @@ import html
 
 import streamlit as st
 
-CLINICIAN = {"name": "Dr. Sarah Mitchell", "initials": "SM", "role": "Infectious Disease",
-             "service": "Antimicrobial stewardship service"}
+SERVICE = "Antimicrobial stewardship service"
 
 # (label, count, colour) for today's worklist
 OVERVIEW = [("Awaiting review", 7, "amber"), ("Pending culture results", 12, "teal"),
@@ -46,10 +46,6 @@ CULTURES = [
 SNAPSHOT = [("Narrow-spectrum first choice", 68), ("Recommendations accepted", 84),
             ("Cultures reviewed within 24h", 91)]
 
-# Infection types with no validated model yet. Each one needs its own model and its own checks
-# before it can be switched on; the UTI model must not be reused for them.
-PLANNED_INFECTIONS = ["Bloodstream infection", "Respiratory infection", "Skin & soft tissue"]
-
 LEVEL_CLASS = {"Critical": "red", "High": "amber", "Medium": "yellow"}
 STATUS_CLASS = {"Pending": "navy", "Preliminary": "teal", "Incubating": "violet"}
 
@@ -79,15 +75,17 @@ def _status(text: str, tone: str) -> str:
     return f'<span class="fx-status fx-status-{tone}">{html.escape(text)}</span>'
 
 
-def _welcome_html() -> str:
+def _welcome_html(clinician: dict) -> str:
     today = datetime.date.today().strftime("%A, %B %-d")
+    names = clinician["name"].removeprefix("Dr. ").split()
+    initials = (names[0][0] + names[-1][0]).upper()
     return f"""
     <div class="fx-dcard fx-welcome">
-      <div class="fx-avatar">{CLINICIAN['initials']}</div>
+      <div class="fx-avatar">{html.escape(initials)}</div>
       <div class="fx-welcome-hi">Welcome back,</div>
-      <div class="fx-welcome-name">{html.escape(CLINICIAN['name'])}</div>
-      <span class="fx-badge fx-badge-teal">{html.escape(CLINICIAN['role'])}</span>
-      <div class="fx-welcome-meta">{today}<br>{html.escape(CLINICIAN['service'])}</div>
+      <div class="fx-welcome-name">{html.escape(clinician['name'])}</div>
+      <span class="fx-badge fx-badge-teal">{html.escape(clinician['role'])}</span>
+      <div class="fx-welcome-meta">{today}<br>{SERVICE}</div>
     </div>"""
 
 
@@ -106,26 +104,18 @@ def _snapshot_html() -> str:
                  meters + '<div class="fx-dnote">Last 7 days</div>')
 
 
-def render(assessment_page):
-    """Draw the dashboard. `assessment_page` is the page the "start" button opens."""
-    left, middle, right = st.columns([5, 6, 6], gap="small")
+def render(clinician: dict):
+    """Draw the dashboard for the signed-in clinician (only the welcome card uses them so far)."""
+    with st.container(key="dash"):
+        left, middle, right = st.columns([5, 6, 6], gap="small")
 
     with left:
-        st.html(_welcome_html() + _overview_html() + _snapshot_html())
+        st.html(_welcome_html(clinician) + _overview_html() + _snapshot_html())
 
     with middle:
         st.html(_card("warning", "red", "Requires attention", len(ATTENTION), "".join(
             _row(case, what, _status(level, LEVEL_CLASS[level])) for case, what, level in ATTENTION)))
-        with st.container(key="startcard"):
-            st.html(f'<div class="fx-dhead fx-dhead-dark"><span class="fx-dicon">{_icon("add_circle")}</span>'
-                    f'<span class="fx-dtitle">Start new assessment</span></div>')
-            if st.button("Urinary tract infection", key="start_uti", width="stretch",
-                         icon=":material/arrow_forward:"):
-                st.switch_page(assessment_page)
-            planned = "".join(f'<div class="fx-planned"><span>{html.escape(name)}</span>'
-                              f'<i>Planned</i></div>' for name in PLANNED_INFECTIONS)
-            st.html(planned + '<p class="fx-start-note">Each infection type gets its own validated '
-                              'model. Urinary tract infection is the one available today.</p>')
+        st.html('<div class="fx-dcard fx-blank"></div>')
 
     with right:
         st.html(_card("monitor_heart", "navy", "Recent activity", len(ACTIVITY), "".join(

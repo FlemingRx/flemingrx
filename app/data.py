@@ -1,9 +1,9 @@
 """Loading the model and tables, and turning patient details into the features the model expects.
 
-Everything downstream works from one thing: a `patient` dict of {feature name: number}. Today the
-short form in app.py fills it in (`blank_patient` + the form's answers). Reading a patient from
-medical records later means writing one more function that returns the same dict; the model call,
-the recommendation rule and the screens don't change.
+Everything downstream works from one thing: a `patient` dict of {feature name: number}.
+`patient_features` builds it from a patient's row in the database (db.py). Reading patients from
+a hospital's records instead means filling that table from them; the model call, the
+recommendation rule and the screens don't change.
 
 On Databricks the model comes from Unity Catalog and the tables from a SQL warehouse. For local
 development both can be replaced with files (see app/README.md):
@@ -133,6 +133,26 @@ def blank_patient(features) -> dict:
         else:
             patient[name] = math.nan        # age, sex, deprivation index: unknown until filled in
     return patient
+
+
+def patient_features(features, record: dict) -> dict:
+    """The model's input for one patient row from the database (see db.patients for the columns)."""
+    patient = blank_patient(features)
+    patient["age_min"] = float(AGE_BANDS[record["age_band"]])
+    patient["gender"] = float(SEX_CODES[record["sex"]])
+    patient.update({name: float(value) for name, value in SETTINGS[record["care_setting"]].items()})
+    patient["nursing_home"] = float(record["nursing_home"])
+    patient["n_prior_resistant_drugs"] = float(len(record["resistant_to"])
+                                               + record["other_resistant_count"])
+    patient["days_since_last_antibiotic"] = float(record["days_since_last_antibiotic"])
+    flags = ([f"prior_resist_{drug}" for drug in record["resistant_to"]]
+             + [f"abx_class_{name}_90d" for name in record["recent_antibiotic_classes"]]
+             + [f"prior_org_{name}" for name in record["prior_organisms"]]
+             + [f"proc_{name}" for name in record["recent_procedures"]])
+    for name in flags:
+        if name in patient:      # the model has no feature for anything else, so it can't use it
+            patient[name] = 1.0
+    return {name: patient[name] for name in features}
 
 
 def options(features, prefix: str, suffix: str = "") -> dict:
