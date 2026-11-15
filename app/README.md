@@ -14,8 +14,7 @@ assigned to them. Screens, from the sidebar:
   pregnancy), each antibiotic's predicted chance of working, and the pick. The clinician accepts
   the recommendation, overrides it with a reason, or decides not to treat; the first two are
   saved as a prescription, and if the patient already has one it is shown instead. Each
-  recommendation and what was decided is written to the assessment log. Its **Evidence** tab has the trade-off chart from
-  `notebooks/04_recommend.py` and its **Limits** tab says what the tool does not do.
+  recommendation and what was decided is written to the assessment log.
 - **Culture Results**: four counts (pending, ready for review, resistance mismatches, reviewed)
   and the list of the clinician's cultures. Selecting one shows the patient's details, the
   culture, the lab's susceptibility results, how the current prescription compares with them,
@@ -82,22 +81,8 @@ token the app asks Databricks for.
 - **Any other Postgres**: set `DATABASE_URL` (`postgresql://user:password@host:5432/dbname`).
 - A different Lakebase compute: set `ENDPOINT_NAME` to its resource name (default in `db.py`).
 
-When deploying as a Databricks App:
-
-1. Add the `flemingrx` project's database to the app as a **Database** resource. This creates a
-   Postgres login for the app and sets `PGHOST`, `PGUSER` and the other `PG*` settings for it.
-2. The tables were created from a laptop, so they belong to that person's login, not the app's.
-   Give the app access by running this in the Lakebase SQL editor, with the app's service
-   principal client ID in place of `<client-id>`:
-
-   ```sql
-   GRANT USAGE ON SCHEMA flemingrx TO "<client-id>";
-   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA flemingrx TO "<client-id>";
-   GRANT USAGE ON ALL SEQUENCES IN SCHEMA flemingrx TO "<client-id>";
-   ```
-
-Creating the tables, loading the demo data, signing in and reading a clinician's patients have
-been run against Lakebase from a laptop. Running as a deployed Databricks App has not.
+The deployed app (below) has this database attached as a resource, and its login has been given
+access to the `flemingrx` schema, including to tables added later from a laptop.
 
 Every time the app starts it brings the database up to date: it creates missing tables, adds
 columns the tables have gained, and loads any fabricated clinicians and patients from `seed.py`
@@ -124,21 +109,42 @@ function in notebook 04, so the app applies the rule that was evaluated.
 
 ## Run it on Databricks
 
-Run notebooks 01 to 04 first, so the model and the `gold_policy_tradeoff` table exist.
+The app is deployed as a Databricks App called `flemingrx`. Its code is the copy of this folder at
+`/Workspace/Users/<you>/flemingrx-app`. To publish a change, upload the folder again and redeploy
+(leave out `__pycache__` and any `.db` files):
 
-1. In the workspace, create a Databricks App from this `app/` folder.
-2. Add a **SQL warehouse** resource to the app and keep the default key `sql-warehouse`
-   (`app.yaml` reads the warehouse ID from it).
-3. Give the app's service principal:
-   - `USE CATALOG` on `workspace` and `USE SCHEMA` on `workspace.armd`
-   - `EXECUTE` on the model `workspace.armd.urine_resistance_model`
-   - `SELECT` on `workspace.armd.gold_policy_tradeoff`
-   - `CAN USE` on the SQL warehouse
-4. Deploy.
+```bash
+databricks workspace import-dir app /Workspace/Users/<you>/flemingrx-app --overwrite
+```
 
-Deploying as a Databricks App has not been tried yet. Loading the registered model and reading
-the table from Databricks has, from a laptop. If the model fails to load with a scikit-learn
-version error, update the pin in `requirements.txt` (the comment there says where to find it).
+```bash
+databricks apps deploy flemingrx --source-code-path /Workspace/Users/<you>/flemingrx-app
+```
+
+What the app was given when it was set up, in case it has to be recreated:
+
+- **Resources on the app:** the SQL warehouse (key `sql-warehouse`, which `app.yaml` reads), the
+  Lakebase database (key `postgres`, which sets `PGHOST`, `PGUSER` and the other `PG*` settings),
+  the MLflow experiment with read access (for the severity bars), and
+  `workspace.armd.gold_policy_tradeoff` with `SELECT`.
+- **Unity Catalog grants to the app's service principal:** `USE CATALOG` on `workspace`,
+  `USE SCHEMA` on `workspace.armd`, and `EXECUTE` on the model `workspace.armd.urine_resistance_model`.
+- **Lakebase grants to the same service principal** (its client ID is the Postgres role name):
+
+  ```sql
+  GRANT USAGE ON SCHEMA flemingrx TO "<client-id>";
+  GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA flemingrx TO "<client-id>";
+  GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA flemingrx TO "<client-id>";
+  ALTER DEFAULT PRIVILEGES IN SCHEMA flemingrx GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "<client-id>";
+  ALTER DEFAULT PRIVILEGES IN SCHEMA flemingrx GRANT USAGE, SELECT ON SEQUENCES TO "<client-id>";
+  ```
+
+The app's tables belong to the person who created them from a laptop, not to the app. So a new
+column or table has to be added by starting the app locally once before redeploying; the deployed
+app can read and write rows but cannot change the tables.
+
+If the model fails to load with a scikit-learn version error, update the pin in
+`requirements.txt` (the comment there says where to find it).
 
 ## Run it locally
 
