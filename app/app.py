@@ -358,6 +358,9 @@ except Exception as error:   # shown to the user: nobody can sign in without the
     st.stop()
 
 if "clinician" not in st.session_state:
+    # Logged out: no sidebar at all (Streamlit otherwise leaves an empty one behind after log out).
+    st.html('<style>[data-testid="stSidebar"], [data-testid="stHeader"] { display: none !important; }'
+            '</style>')
     st.navigation([st.Page(sign_in_page, title="Log in")], position="hidden").run()
     st.stop()
 
@@ -380,7 +383,9 @@ if current is not cultures:
 if current is not follow:
     st.session_state.pop("follow_up", None)
 
-st.logo(str(LOGO_LIGHT), size="large", icon_image=str(MARK))
+# The same image for both: Streamlit swaps to icon_image when it thinks the sidebar is collapsed,
+# which a browser can still remember from before the sidebar was fixed open.
+st.logo(str(LOGO_LIGHT), size="large", icon_image=str(LOGO_LIGHT))
 with st.sidebar:
     st.html(f'<div class="fx-sidenote"><b>Signed in</b>{html.escape(clinician["name"])}<br>'
             f'{html.escape(clinician["role"])}</div>')

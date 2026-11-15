@@ -400,3 +400,13 @@ button[data-variant="pills"] { border-radius: 0 !important; }
 .fx-next p { margin: 0; font-size: .88rem; line-height: 1.5; color: var(--fx-ink); font-weight: 500; }
 .st-key-fu_save button { background: var(--fx-navy); border-color: var(--fx-navy); }
 .st-key-fu_save button:hover:not(:disabled) { background: var(--fx-teal); border-color: var(--fx-teal); }
+
+/* ---------- the sidebar is fixed open: no collapse or reopen buttons, no resizing ---------- */
+/* (on phone-width screens it would cover the page, so there it keeps Streamlit's open/close buttons) */
+@media (min-width: 768px) {
+  [data-testid="stSidebar"] { transform: none !important; width: 17rem !important;
+    min-width: 17rem !important; max-width: 17rem !important; }
+  [data-testid="stSidebarCollapseButton"], [data-testid="stExpandSidebarButton"],
+  [data-testid="stHeader"] { display: none !important; }
+  .stApp:has([data-testid="stExpandSidebarButton"]) [data-testid="stMainBlockContainer"] { padding-top: 1.1rem; }
+}
