@@ -41,18 +41,18 @@ st.set_page_config(page_title="FlemingRx · Antibiotic stewardship", page_icon=s
                    layout="wide", initial_sidebar_state="auto")
 
 
-@st.cache_resource(show_spinner="Loading the model...")
+@st.cache_resource(show_spinner="Loading...")
 def get_model():
     model = data.load_model()
     return model, data.model_features(model)
 
 
-@st.cache_data(show_spinner="Loading the evaluation results...")
+@st.cache_data(show_spinner="Loading...")
 def get_table(name: str) -> pd.DataFrame:
     return data.load_table(name)
 
 
-@st.cache_resource(show_spinner="Connecting to the database...")
+@st.cache_resource(show_spinner="Connecting...")
 def database_ready() -> bool:
     db.init()
     return True
