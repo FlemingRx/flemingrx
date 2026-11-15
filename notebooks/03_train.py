@@ -37,6 +37,7 @@
 # MAGIC - Every run logged in **MLflow** (scores, settings, the models).
 # MAGIC - The final model registered in **Unity Catalog** as `workspace.armd.urine_resistance_model`.
 # MAGIC - Test-year predictions saved to `workspace.armd.gold_test_predictions` for notebook 04.
+# MAGIC - Every input ranked by importance, saved to `workspace.armd.gold_feature_importance`.
 # MAGIC - 2021 validation predictions saved to `workspace.armd.gold_validation_predictions`, so notebook
 # MAGIC   04 can choose its settings without looking at the test years.
 
@@ -90,6 +91,25 @@ GB_PARAMS = dict(GB_CANDIDATES[0])   # replaced by the best candidate in section
 # once without them.
 NEW_FEATURE_PREFIXES = ("days_since_drug_", "days_since_subtype_", "days_since_resist_",
                         "n_antibiotic_days_", "n_prior_cultures_", "comorb_", "n_comorbidities")
+
+# Section 6b ranks the inputs by importance. It scores the test cultures a few hundred times, which
+# takes several minutes; set RUN_IMPORTANCE to False to skip it.
+RUN_IMPORTANCE = True
+IMPORTANCE_REPEATS = 3            # shuffles per input (more = steadier numbers, slower)
+IMPORTANCE_MIN_RESISTANT = 200    # skip drugs with fewer resistant test cultures: too noisy to rank on
+# Which group each input belongs to: (group name, how the input's name starts)
+FEATURE_GROUPS = [
+    ("Past resistance", ("prior_resist_", "days_since_resist_", "n_prior_resistant_drugs")),
+    ("Antibiotic exposure", ("abx_class_", "days_since_drug_", "days_since_subtype_",
+                             "days_since_last_antibiotic", "n_antibiotic_days_")),
+    ("Past organisms", ("prior_org_", "n_prior_cultures_")),
+    ("Where the culture was ordered", ("ward_", "is_inpatient")),
+    ("Demographics", ("age_min", "gender", "adi_")),
+    ("Procedures", ("proc_",)),
+    ("Nursing home", ("nursing_home",)),
+    ("Comorbidities", ("comorb_", "n_comorbidities")),
+    ("Labs and vital signs", ("lab_", "vital_")),
+]
 
 MODEL_NAME = tbl("urine_resistance_model")
 EXPERIMENT_NAME = "flemingrx_urine_resistance"
@@ -199,6 +219,27 @@ def average_by_model(rows):
                     "mean_auprc": round(float(np.nanmean([r["auprc"] for r in mine])), 3),
                     "mean_brier": round(float(np.mean([r["brier"] for r in mine])), 4)})
     return out
+
+
+def feature_group(name):
+    """The group in FEATURE_GROUPS that an input belongs to."""
+    return next((group for group, starts in FEATURE_GROUPS if name.startswith(starts)), "Other")
+
+
+def auroc_drop(model, X_eval, y_eval, columns, repeats, rng):
+    """How much AUROC falls when `columns` are shuffled between patients (averaged over `repeats`).
+
+    Shuffling an input keeps its values but breaks its link to the patient, so the model can no
+    longer use it. A big drop means the model relies on it. Several columns are shuffled together
+    (each patient gets another patient's whole set), which measures a group of inputs at once.
+    """
+    base = roc_auc_score(y_eval, model.predict_proba(X_eval)[:, 1])
+    drops = []
+    for _ in range(repeats):
+        shuffled = X_eval.copy()
+        shuffled[:, columns] = X_eval[rng.permutation(len(X_eval))][:, columns]
+        drops.append(base - roc_auc_score(y_eval, model.predict_proba(shuffled)[:, 1]))
+    return float(np.mean(drops))
 
 
 def calibration_table(y, p, bins=10):
@@ -387,6 +428,75 @@ for d in DRUGS:
     for row in calibration_table(y[pred["rows"]], pred["p"]):
         calibration_rows.append({"antibiotic": d, **row})
 display(pd.DataFrame(calibration_rows))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 6b. Which inputs matter most?
+# MAGIC For each input, we shuffle its values between the test patients and measure how much the chosen
+# MAGIC model's AUROC falls. A bigger fall means the model relies on that input more. This is called
+# MAGIC permutation importance.
+# MAGIC
+# MAGIC **How to read the tables:**
+# MAGIC - **Groups first.** Inputs that say nearly the same thing share the credit: "days since
+# MAGIC   nitrofurantoin" and "nitrofuran class in the last 90 days" overlap, so each looks smaller alone
+# MAGIC   than the information is worth. The group table shuffles a whole group together, which is the
+# MAGIC   fairer summary.
+# MAGIC - **A fall near 0** means removing that one input changes almost nothing. It does not mean the
+# MAGIC   fact is medically irrelevant.
+# MAGIC - Figures are averaged over the antibiotics with enough resistant test cultures to rank on
+# MAGIC   (`IMPORTANCE_MIN_RESISTANT`); meropenem has too few.
+# MAGIC
+# MAGIC The full ranking is saved to `workspace.armd.gold_feature_importance`. The demo app can use it
+# MAGIC to say *why* a patient's prediction is high.
+
+# COMMAND ----------
+
+if RUN_IMPORTANCE:
+    rng = np.random.default_rng(SEED)
+    scored_drugs = [d for d in DRUGS
+                    if y[test_predictions[(d, BEST_MODEL)]["rows"]].sum() >= IMPORTANCE_MIN_RESISTANT]
+    groups = list(dict.fromkeys(feature_group(f) for f in FEATURES))
+    feature_drops = {f: {} for f in FEATURES}
+    group_drops = {g: {} for g in groups}
+    for d in scored_drugs:
+        pred = test_predictions[(d, BEST_MODEL)]
+        X_eval, y_eval, model = X[pred["rows"]], y[pred["rows"]], pred["model"]
+        for j, f in enumerate(FEATURES):
+            feature_drops[f][d] = auroc_drop(model, X_eval, y_eval, [j], IMPORTANCE_REPEATS, rng)
+        for g in groups:
+            members = [j for j, f in enumerate(FEATURES) if feature_group(f) == g]
+            group_drops[g][d] = auroc_drop(model, X_eval, y_eval, members, IMPORTANCE_REPEATS, rng)
+
+    group_importance = pd.DataFrame([
+        {"group": g, "inputs": sum(feature_group(f) == g for f in FEATURES),
+         "mean_auroc_drop": round(float(np.mean(list(drops.values()))), 4)}
+        for g, drops in group_drops.items()
+    ]).sort_values("mean_auroc_drop", ascending=False, ignore_index=True)
+
+    feature_importance = pd.DataFrame([
+        {"feature": f, "group": feature_group(f),
+         "mean_auroc_drop": round(float(np.mean(list(drops.values()))), 4),
+         "matters_most_for": max(drops, key=drops.get),
+         **{f"drop_{d}": round(drops[d], 4) for d in scored_drugs}}
+        for f, drops in feature_drops.items()
+    ]).sort_values("mean_auroc_drop", ascending=False, ignore_index=True)
+    feature_importance.insert(0, "rank", feature_importance.index + 1)
+
+    (
+        spark.createDataFrame(feature_importance)
+        .write.mode("overwrite").option("overwriteSchema", True)
+        .saveAsTable(tbl("gold_feature_importance"))
+    )
+    with mlflow.start_run(run_id=RUN_ID):
+        mlflow.log_table(feature_importance, artifact_file="feature_importance.json")
+        mlflow.log_table(group_importance, artifact_file="feature_group_importance.json")
+
+    print(f"Ranked {len(FEATURES)} inputs on {len(scored_drugs)} antibiotics: {', '.join(scored_drugs)}")
+    display(group_importance)
+    display(feature_importance.head(25))
+else:
+    print("RUN_IMPORTANCE is False: skipped.")
 
 # COMMAND ----------
 
