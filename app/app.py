@@ -1,4 +1,8 @@
-"""FlemingRx demo app: patient details in, a recommended antibiotic out.
+"""FlemingRx: an antibiotic stewardship platform for clinicians.
+
+This file is the frame around every screen (sidebar, top bar, footer) and holds the clinical
+assessment screen: patient details in, a recommended antibiotic out. The dashboard is in
+dashboard.py. Screens that are planned but not built yet are listed in PLANNED below.
 
 Run locally with `streamlit run app.py` from this folder (see README.md for the two settings a
 local run needs). On Databricks it runs as a Databricks App using app.yaml.
@@ -16,17 +20,19 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+import dashboard
 import data
 import policy
 
 HERE = pathlib.Path(__file__).parent
 LOGO = HERE / "assets" / "flemingrx-logo.png"
+LOGO_LIGHT = HERE / "assets" / "flemingrx-logo-light.png"   # white wordmark, for the navy sidebar
 MARK = HERE / "assets" / "flemingrx-mark.png"
 
 NAVY, TEAL = "#132557", "#009788"
 
-st.set_page_config(page_title="FlemingRx · UTI antibiotic stewardship", page_icon=str(MARK),
-                   layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="FlemingRx · Antibiotic stewardship", page_icon=str(MARK),
+                   layout="wide", initial_sidebar_state="auto")
 
 
 @st.cache_resource(show_spinner="Loading the model...")
@@ -57,17 +63,17 @@ def card(key: str, icon: str, title: str, hint: str | None = None):
     return box
 
 
-def top_bar(source: str):
+def top_bar(page_title: str, sample_data: bool):
+    sample = '<span class="fx-chip fx-chip-amber">Sample data</span>' if sample_data else ""
     st.html(f"""
     <div class="fx-topbar">
-      <div class="fx-brand">
-        <img src="{image_data_uri(LOGO)}" alt="FlemingRx" />
-        <span class="fx-divider"></span>
-        <span class="fx-product">UTI Antibiotic Stewardship</span>
+      <div class="fx-crumbs">
+        <span>FlemingRx</span><span class="fx-crumb-sep">›</span><b>{html.escape(page_title)}</b>
       </div>
       <div class="fx-topbar-right">
         <span class="fx-chip fx-chip-teal"><span class="fx-dot"></span>Stewardship mode</span>
-        <span class="fx-chip" title="{html.escape(source)}">Research demo</span>
+        {sample}
+        <span class="fx-chip" title="{html.escape(data.model_source())}">Research demo</span>
       </div>
     </div>""")
 
@@ -294,34 +300,79 @@ def limits_tab():
             st.write(body)
 
 
-# ----------------------------------------------------------------------------- page
+# ----------------------------------------------------------------------------- screens
+
+def assessment_page():
+    try:
+        model, features = get_model()
+    except Exception as error:   # shown to the user: nothing works without the model
+        st.error(f"The model could not be loaded from {data.model_source()}. {error}",
+                 icon=":material/error:")
+        st.caption("Running locally? Install the requirements first: pip install -r app/requirements.txt")
+        return
+
+    recommend_tab, evidence, limits = st.tabs([":material/clinical_notes: Recommend",
+                                               ":material/insights: Evidence",
+                                               ":material/info: Limits"])
+    with recommend_tab:
+        form_column, result_column = st.columns([5, 7], gap="large")
+        with form_column:
+            st.html('<div class="fx-formhead"><div class="fx-title">Patient details</div>'
+                    '<div class="fx-sub">Urinary tract infection. Enter risk factors; the estimate '
+                    'updates as you go.</div></div>')
+            patient = patient_form(features)
+        with result_column:
+            target = recommendation_panel(model, features, patient)
+    with evidence:
+        evidence_tab(target)
+    with limits:
+        limits_tab()
+
+
+# Screens from the roadmap that are not built yet: (title, address, icon, what it will hold).
+PLANNED = [
+    ("Patient Encounters", "patients", "group",
+     "Each patient's history in one place: allergies, current medicines, kidney and liver "
+     "function, earlier infections, antibiotic exposure and past culture results."),
+    ("Culture Results", "cultures", "biotech",
+     "Urine culture and susceptibility results as they come back, with a flag when the empiric "
+     "choice should be reconsidered or can be narrowed."),
+    ("Follow-up", "follow-up", "event_repeat",
+     "What happens after treatment starts: response, side effects, reassessment reminders and "
+     "treatment completion."),
+    ("Stewardship Analytics", "analytics", "bar_chart",
+     "Prescribing across the service: broad versus narrow use, recommendations accepted or "
+     "overridden, and resistance trends."),
+]
+
+
+def planned_page(icon: str, title: str, body: str):
+    def page():
+        st.html(f"""<div class="fx-empty">
+          <span class="fx-badge fx-badge-navy">Planned</span>
+          <div class="fx-title">{html.escape(title)}</div>
+          <p>{html.escape(body)}</p>
+        </div>""")
+    return page
+
+
+# ----------------------------------------------------------------------------- frame
+
+assessment = st.Page(assessment_page, title="Clinical Assessment", url_path="assessment",
+                     icon=":material/clinical_notes:")
+home = st.Page(lambda: dashboard.render(assessment), title="Dashboard", url_path="dashboard",
+               icon=":material/dashboard:", default=True)
+planned = [st.Page(planned_page(icon, title, body), title=title, url_path=path,
+                   icon=f":material/{icon}:") for title, path, icon, body in PLANNED]
+current = st.navigation({"Workspace": [home, assessment], "Coming next": planned})
 
 st.html(HERE / "styles.css")
-top_bar(data.model_source())
+st.logo(str(LOGO_LIGHT), size="large", icon_image=str(MARK))
+st.sidebar.html('<div class="fx-sidenote"><b>Research demo</b>Built on de-identified data. '
+                'Not for clinical use.</div>')
+top_bar(current.title, sample_data=current is home)
 
-try:
-    model, features = get_model()
-except Exception as error:   # shown to the user: nothing works without the model
-    st.error(f"The model could not be loaded from {data.model_source()}. {error}",
-             icon=":material/error:")
-    st.caption("Running locally? Install the requirements first: pip install -r app/requirements.txt")
-    st.stop()
-
-recommend_tab, evidence, limits = st.tabs([":material/clinical_notes: Recommend",
-                                           ":material/insights: Evidence",
-                                           ":material/info: Limits"])
-with recommend_tab:
-    form_column, result_column = st.columns([5, 7], gap="large")
-    with form_column:
-        st.html('<div class="fx-formhead"><div class="fx-title">Patient details</div>'
-                '<div class="fx-sub">Enter risk factors. The estimate updates as you go.</div></div>')
-        patient = patient_form(features)
-    with result_column:
-        target = recommendation_panel(model, features, patient)
-with evidence:
-    evidence_tab(target)
-with limits:
-    limits_tab()
+current.run()
 
 st.html(f"""<div class="fx-footer">
   <img src="{image_data_uri(MARK)}" alt="" />

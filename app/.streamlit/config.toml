@@ -7,11 +7,17 @@ secondaryBackgroundColor = "#FFFFFF"
 textColor = "#1B2541"
 borderColor = "#E2E7EF"
 showWidgetBorder = true
-baseRadius = "10px"
-buttonRadius = "10px"
+baseRadius = "none"
+buttonRadius = "none"
 font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
 headingFont = "Plus Jakarta Sans:https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap"
 chartCategoricalColors = ["#009788", "#132557", "#E0A43A", "#8A94A8"]
+
+[theme.sidebar]
+backgroundColor = "#132557"
+secondaryBackgroundColor = "#1D3577"
+textColor = "#FFFFFF"
+borderColor = "#263B73"
 
 [client]
 toolbarMode = "minimal"

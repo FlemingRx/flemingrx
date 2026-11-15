@@ -1,19 +1,25 @@
 # FlemingRx app
 
-A Streamlit app that takes a patient's details and recommends an antibiotic for a urine
-infection, using the model registered by `notebooks/03_train.py`.
+A Streamlit app for clinicians managing antibiotics for urine infections, using the model
+registered by `notebooks/03_train.py`.
 
-Three tabs:
+Screens, from the sidebar:
 
-- **Recommendation**: a short form, each antibiotic's predicted chance of working, and the pick.
-- **Evidence**: the trade-off chart from `notebooks/04_recommend.py`.
-- **Limits**: what the tool does not do.
+- **Dashboard**: the landing page. Today's worklist, cases needing attention, recent activity,
+  pending cultures, and the button that starts an assessment. It shows sample data for now
+  (written out at the top of `dashboard.py`); there is no patient database yet.
+- **Clinical Assessment**: a short form, each antibiotic's predicted chance of working, and the
+  pick. Its **Evidence** tab has the trade-off chart from `notebooks/04_recommend.py` and its
+  **Limits** tab says what the tool does not do.
+- **Coming next**: Patient Encounters, Culture Results, Follow-up and Stewardship Analytics are
+  placeholders that say what each will hold.
 
 ## How it fits together
 
 | File | What it does |
 |---|---|
-| `app.py` | The screens and the form. |
+| `app.py` | The frame around every screen (sidebar, top bar) and the clinical assessment. |
+| `dashboard.py` | The dashboard and its sample data. |
 | `policy.py` | The recommendation rule: the narrowest antibiotic that clears the bar. |
 | `data.py` | Loads the model and tables; turns patient details into model features. |
 | `app.yaml` | Databricks Apps configuration. |
@@ -71,7 +77,7 @@ The app looks for the model and table in this order:
    `DATABRICKS_WAREHOUSE_ID` set to the warehouse ID (the last part of the warehouse's HTTP path
    under SQL Warehouses -> Connection details).
 
-The sidebar shows which model is in use.
+The footer shows which model is in use.
 
 Other settings: `TARGET_SUCCESS` (default `0.90`) sets where the slider starts, and `MODEL_NAME`
 picks a different registered model.
