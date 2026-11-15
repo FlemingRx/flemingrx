@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "flemingrx-app",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": ["-c", "cd app && MODEL_URI=../data/localApp/model LOCAL_DATA_DIR=../data/localApp/tables ../.venv/bin/streamlit run app.py --server.port 8517 --server.headless true"],
+      "port": 8517
+    }
+  ]
+}

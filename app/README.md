@@ -17,6 +17,7 @@ Three tabs:
 | `policy.py` | The recommendation rule: the narrowest antibiotic that clears the bar. |
 | `data.py` | Loads the model and tables; turns patient details into model features. |
 | `app.yaml` | Databricks Apps configuration. |
+| `styles.css`, `.streamlit/config.toml`, `assets/` | The FlemingRx look: brand colours and fonts, card and result-panel styling, the logo. |
 
 Everything works from one `patient` dict of `{feature name: number}`. Today the form fills it in.
 Reading a patient from medical records later means adding one function in `data.py` that returns
@@ -53,8 +54,11 @@ pip install -r app/requirements.txt
 ```
 
 ```bash
-streamlit run app/app.py
+cd app && streamlit run app.py
 ```
+
+Run it from inside `app/` so Streamlit picks up the brand theme in `app/.streamlit/config.toml`
+(Streamlit reads that file from the folder it is started in).
 
 The app looks for the model and table in this order:
 
