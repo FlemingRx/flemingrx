@@ -10,8 +10,9 @@
 # MAGIC - **Label** (`resistant`): 1 if the bacteria turned out resistant to that antibiotic, 0 if
 # MAGIC   susceptible.
 # MAGIC - **Features**: only what was known **when the culture was ordered**: age, sex, ward,
-# MAGIC   antibiotics taken recently, past resistant infections, past organisms, recent procedures,
-# MAGIC   nursing-home contact, recent labs and vital signs.
+# MAGIC   antibiotics taken recently (by class, subtype and specific drug, and how many days ago), past
+# MAGIC   resistant infections (and how long ago), past organisms, recent procedures, nursing-home
+# MAGIC   contact, long-term diagnoses (if notebook 01b was run), recent labs and vital signs.
 # MAGIC - **Split**: older cultures are for training, the most recent years are held back for testing.
 # MAGIC
 # MAGIC ### The one rule that matters most: no data leakage
@@ -20,7 +21,7 @@
 # MAGIC life. Every history feature below only uses events **at least 1 day before** the culture
 # MAGIC (3 days for past lab results, which take that long to come back).
 # MAGIC
-# MAGIC **Input:** the `bronze_*` tables from notebook 01.
+# MAGIC **Input:** the `bronze_*` tables from notebook 01 (and `bronze_comorbidity` from 01b, optional).
 # MAGIC **Output:** `workspace.armd.gold_urine_features`.
 
 # COMMAND ----------
@@ -60,6 +61,34 @@ TEST_START_YEAR = 2022   # train on 2008-2021, test on 2022 onwards
 
 RECENT_DAYS = 90         # window for "recent" antibiotics and procedures
 HISTORY_DAYS = 365       # window for past organisms and past resistance
+LOOKBACK_DAYS = 730      # how far back the "days since ..." features look (2 years)
+
+# Individual antibiotics worth tracking on their own. The class flags lump very different drugs
+# together (cephalexin and ceftriaxone are both "Beta Lactam"), but resistance follows the specific
+# drug. Each entry: feature name -> (text the medication name may contain, text that rules it out).
+# Matching is case-insensitive. Ear/eye drops and skin creams are ruled out: they don't drive
+# resistance in the urinary tract the way tablets and IV drugs do.
+NOT_SYSTEMIC = ["dexamethasone", "silver sulfadiazine"]
+SPECIFIC_ANTIBIOTICS = {
+    "nitrofurantoin":          (["nitrofurantoin", "macrobid", "macrodantin"], []),
+    "trimethoprim":            (["sulfamethoxazole", "bactrim", "trimethoprim"], []),
+    "cephalexin":              (["cephalexin", "keflex", "cefadroxil"], []),
+    "cefazolin":               (["cefazolin"], []),
+    "oral_cephalosporin_gen3": (["cefpodoxime", "cefdinir"], []),
+    "ceftriaxone":             (["ceftriaxone"], []),
+    "cefepime":                (["cefepime"], []),
+    "ciprofloxacin":           (["cipro"], []),
+    "levofloxacin":            (["levofloxacin", "levaquin"], []),
+    "amoxicillin_clavulanate": (["clavulan", "augmentin"], []),
+    "amoxicillin_ampicillin":  (["amoxicillin", "ampicillin"], ["clavulan"]),
+    "piperacillin_tazobactam": (["piperacillin"], []),
+    "carbapenem":              (["meropenem", "ertapenem"], []),
+}
+
+# Comorbidities (diagnoses such as diabetes or kidney disease) need the extra table from notebook
+# 01b. If that table doesn't exist, this notebook skips them and still runs.
+USE_COMORBIDITIES = True
+TOP_COMORBIDITIES = 60   # keep the N most common diagnoses in the training years as yes/no flags
 
 # Lab results that count as "the drug will not work reliably" -> resistant = 1.
 # Intermediate results are counted as resistant because a doctor wouldn't rely on that drug.
@@ -366,9 +395,177 @@ nursing_home = (
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## 6b. Patient history: how long ago, and which specific drug
+# MAGIC The flags above only say *whether* something happened in a fixed window. These say **how many
+# MAGIC days ago** it last happened (up to 2 years; "never" is stored as 731). One number covers every
+# MAGIC window at once: gradient boosting picks the cut-offs that matter (7 days, 30, 180...) by itself,
+# MAGIC instead of us guessing one.
+# MAGIC
+# MAGIC - `days_since_drug_<name>`: the last dose of a **specific** antibiotic (see
+# MAGIC   `SPECIFIC_ANTIBIOTICS` in the settings), e.g. ciprofloxacin rather than "any fluoroquinolone".
+# MAGIC - `days_since_subtype_<name>`: the last dose of each antibiotic **subtype** (e.g. 1st- vs
+# MAGIC   3rd-generation cephalosporin, carbapenem), which is finer than the class.
+# MAGIC - `days_since_resist_<drug>`: the last culture that was resistant to each target drug.
+# MAGIC - `n_antibiotic_days_365d` / `n_prior_cultures_365d`: how many different days in the last year
+# MAGIC   the patient was on an antibiotic, or had an infecting organism found.
+# MAGIC
+# MAGIC Same leakage guards as before: at least 1 day before the culture, 3 days for past results.
+
+# COMMAND ----------
+
+NEVER = LOOKBACK_DAYS + 1
+
+
+def days_since(df, groups, prefix, min_days=1, max_days=LOOKBACK_DAYS):
+    """One column per group: days since the most recent matching row between min_days and
+    max_days before the culture. `df` needs order_proc_id_coded and _days; `groups` maps
+    name -> condition. No matching row -> missing (filled with NEVER in section 7)."""
+    df = df.where((F.col("_days") >= min_days) & (F.col("_days") <= max_days))
+    return df.groupBy("order_proc_id_coded").agg(*[
+        F.min(F.when(condition, F.col("_days"))).alias(f"{prefix}_{name}")
+        for name, condition in groups.items()
+    ])
+
+
+def name_matches(col, include, exclude):
+    """Case-insensitive: the name contains any of `include` and none of `exclude`."""
+    lower = F.lower(F.col(col))
+    hit = reduce(lambda a, b: a | b, [lower.like(f"%{t}%") for t in include])
+    for t in exclude + NOT_SYSTEMIC:
+        hit = hit & ~lower.like(f"%{t}%")
+    return hit
+
+
+abx_events = spark.table(tbl("bronze_antibiotic_class_exposure")).withColumn(
+    "_days", days("time_to_culturetime"))
+
+specific_drug_recency = days_since(
+    abx_events,
+    {name: name_matches("medication_name", inc, exc) for name, (inc, exc) in SPECIFIC_ANTIBIOTICS.items()},
+    "days_since_drug",
+)
+
+subtype_events = spark.table(tbl("bronze_antibiotic_subtype_exposure")).withColumn(
+    "_days", days("medication_time_to_culturetime"))
+SUBTYPES = sorted(r[0] for r in subtype_events.select("antibiotic_subtype").distinct().collect()
+                  if r[0] is not None)
+subtype_recency = days_since(
+    subtype_events,
+    {slug(s): F.col("antibiotic_subtype") == s for s in SUBTYPES},
+    "days_since_subtype",
+)
+
+past_resistance_events = (
+    orders.select("order_proc_id_coded", "anon_id", order_timestamp("order_time").alias("order_ts"))
+    .join(past_resistant_results, "anon_id")
+    .withColumn("_days", F.datediff("order_ts", "past_time"))
+)
+resistance_recency = days_since(
+    past_resistance_events,
+    {slug(name): F.col("past_abx") == name.lower() for name in TARGET_ANTIBIOTICS},
+    "days_since_resist",
+    min_days=PRIOR_RESULT_MIN_DAYS,
+)
+
+# How much antibiotic, and how many past infections, in the last year
+abx_burden = (
+    abx_events.where((F.col("_days") >= 1) & (F.col("_days") <= HISTORY_DAYS))
+    .groupBy("order_proc_id_coded")
+    .agg(F.countDistinct("_days").alias("n_antibiotic_days_365d"))
+)
+culture_burden = (
+    spark.table(tbl("bronze_prior_infecting_organism"))
+    .withColumn("_days", days("prior_infecting_organism_days_to_culture"))
+    .where((F.col("_days") >= 1) & (F.col("_days") <= HISTORY_DAYS))
+    .groupBy("order_proc_id_coded")
+    .agg(F.countDistinct("_days").alias("n_prior_cultures_365d"))
+)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 6c. Comorbidities (only if notebook 01b was run)
+# MAGIC Long-term conditions such as diabetes, kidney disease or a urinary-tract disorder. They come from
+# MAGIC `bronze_comorbidity`, one row per (culture, diagnosis) with the day the diagnosis started.
+# MAGIC
+# MAGIC - Only diagnoses that started **at least 1 day before** the culture count (a diagnosis written
+# MAGIC   during the same visit may have been made because of this infection).
+# MAGIC - There are hundreds of diagnosis groups, most of them rare. We keep the `TOP_COMORBIDITIES`
+# MAGIC   most common ones **in the training years** as `comorb_<name>` flags, plus `n_comorbidities`
+# MAGIC   (how many different diagnoses the patient has). Choosing them from training years only keeps
+# MAGIC   the test years untouched.
+# MAGIC - The table is ~20 GB, so we first save just our urine cultures' rows to a small helper table
+# MAGIC   (`silver_urine_comorbidity`) and work from that.
+
+# COMMAND ----------
+
+def table_exists(name):
+    try:
+        spark.table(tbl(name)).columns       # fails if the table isn't there
+        return True
+    except Exception:
+        return False
+
+
+comorbidity_tables = []
+if USE_COMORBIDITIES and table_exists("bronze_comorbidity"):
+    (
+        spark.table(tbl("bronze_comorbidity"))
+        .join(F.broadcast(orders.select("order_proc_id_coded", "split")), "order_proc_id_coded")
+        .select(
+            "order_proc_id_coded", "split",
+            F.trim("comorbidity_component").alias("component"),
+            days("comorbidity_component_start_days_culture").alias("_days"),
+        )
+        .where(F.col("component").isNotNull() & F.col("_days").isNotNull())
+        .write.mode("overwrite").option("overwriteSchema", True)
+        .saveAsTable(tbl("silver_urine_comorbidity"))
+    )
+    comorbidity = spark.table(tbl("silver_urine_comorbidity"))
+
+    # Like every other ARMD file, positive days should mean "before the culture". Stop if not.
+    share_negative = comorbidity.select(F.avg((F.col("_days") < 0).cast("int"))).first()[0]
+    assert share_negative is not None, "bronze_comorbidity has no rows for our urine cultures"
+    print(f"Diagnosis start days below 0 (after the culture): {share_negative:.1%}")
+    assert share_negative < 0.5, (
+        "Most start days are negative, so this file may count days the other way round. "
+        "Check the columns in notebook 01b before going on.")
+
+    before = comorbidity.where(F.col("_days") >= 1)
+    top = [r["component"] for r in (
+        before.where(F.col("split") == "train")
+        .groupBy("component").agg(F.countDistinct("order_proc_id_coded").alias("cultures"))
+        .orderBy(F.desc("cultures"), "component")
+        .limit(TOP_COMORBIDITIES)
+        .collect()
+    )]
+    # short, unique column names: comorb_<first 50 characters of the name>
+    columns = {}
+    for name in top:
+        base = f"comorb_{slug(name)[:50]}"
+        col_name, k = base, 2
+        while col_name in columns.values():
+            col_name, k = f"{base}_{k}", k + 1
+        columns[name] = col_name
+    print(f"Comorbidity flags ({len(top)}):", ", ".join(top))
+
+    comorbidity_tables = [
+        before.groupBy("order_proc_id_coded").agg(
+            *[F.max(F.when(F.col("component") == name, 1).otherwise(0)).alias(col_name)
+              for name, col_name in columns.items()],
+            F.countDistinct("component").alias("n_comorbidities"),
+        )
+    ]
+else:
+    print("No bronze_comorbidity table (or USE_COMORBIDITIES is False): skipping comorbidities.")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 7. Put it all together
 # MAGIC Every feature table is joined onto the culture list. A patient with no history row simply had no
-# MAGIC such event, so missing history flags become 0. Labs, vitals and ADI stay missing when absent.
+# MAGIC such event, so missing history flags and counts become 0, and missing "days since" values
+# MAGIC become "never" (731). Labs, vitals and ADI stay missing when absent.
 # MAGIC
 # MAGIC We also add `prior_resist_same_drug`: was this patient's infection resistant to *this row's*
 # MAGIC antibiotic in the last year?
@@ -376,7 +573,9 @@ nursing_home = (
 # COMMAND ----------
 
 feature_tables = [demographics, ward, adi, labs, vitals, abx_exposure, abx_recency,
-                  prior_organisms, prior_resistance, procedures, nursing_home]
+                  prior_organisms, prior_resistance, procedures, nursing_home,
+                  specific_drug_recency, subtype_recency, resistance_recency, abx_burden,
+                  culture_burden, *comorbidity_tables]
 
 order_features = reduce(
     lambda acc, df: acc.join(df, "order_proc_id_coded", "left"),
@@ -385,10 +584,13 @@ order_features = reduce(
 )
 
 zero_fill = [c for c in order_features.columns
-             if c.startswith(("abx_class_", "prior_org_", "prior_resist_", "proc_"))
-             or c in ("nursing_home", "n_prior_resistant_drugs")]
+             if c.startswith(("abx_class_", "prior_org_", "prior_resist_", "proc_", "comorb_", "n_"))
+             or c == "nursing_home"]
+never_fill = [c for c in order_features.columns
+              if c.startswith(("days_since_drug_", "days_since_subtype_", "days_since_resist_"))]
 order_features = order_features.select(*[
     F.coalesce(F.col(c), F.lit(0)).alias(c) if c in zero_fill
+    else F.coalesce(F.col(c), F.lit(NEVER)).alias(c) if c in never_fill
     else F.coalesce(F.col(c), F.lit(HISTORY_DAYS + 1)).alias(c) if c == "days_since_last_antibiotic"
     else F.col(c)
     for c in order_features.columns
