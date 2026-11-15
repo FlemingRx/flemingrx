@@ -11,7 +11,7 @@
 # MAGIC
 # MAGIC **What we compare (on the 2022+ test cultures, which no model saw during training):**
 # MAGIC - **Antibiogram policy (today):** the same rule, using the hospital's overall success rate for
-# MAGIC   each drug. Every patient gets the same drug.
+# MAGIC   each drug over the most recent year. Every patient gets the same drug.
 # MAGIC - **Model policy (ours):** the same rule, using the model's personal prediction for each patient.
 # MAGIC
 # MAGIC **Two outcomes matter, and they pull against each other:**
@@ -23,7 +23,12 @@
 # MAGIC **The headline:** at the **same failure rate** as the antibiogram, how much less broad-spectrum
 # MAGIC antibiotic does the model need?
 # MAGIC
-# MAGIC **Input:** `workspace.armd.gold_test_predictions` from notebook 03.
+# MAGIC **No tuning on the test years.** The model setting that matches the antibiogram's failure rate is
+# MAGIC chosen on the **2021 validation cultures**, then applied unchanged to 2022+. Choosing it on the
+# MAGIC test years themselves would make the headline look better than it really is.
+# MAGIC
+# MAGIC **Input:** `workspace.armd.gold_test_predictions` and `workspace.armd.gold_validation_predictions`
+# MAGIC from notebook 03.
 # MAGIC **Output:** tables and a chart for the slides, saved to `workspace.armd.gold_policy_tradeoff`
 # MAGIC and logged to MLflow.
 
@@ -109,32 +114,43 @@ def matched_model_policy(P_model, R, drugs, max_failure_pct):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Load the test-year predictions
-# MAGIC We keep the cultures where the lab tested **all 7 drugs** (about 89% of them), so every
-# MAGIC recommendation can be checked against a real lab result. The rest mostly grew organisms for
-# MAGIC which some drugs aren't routinely tested.
+# MAGIC ## 3. Load the predictions
+# MAGIC Two sets: the **2022+ test cultures** (for every reported number) and the **2021 validation
+# MAGIC cultures** (only for choosing the model setting in section 5).
+# MAGIC
+# MAGIC In both we keep the cultures where the lab tested **all 7 drugs** (about 92% of the test ones), so
+# MAGIC every recommendation can be checked against a real lab result. The rest mostly grew organisms for
+# MAGIC which some drugs aren't routinely tested; section 6 looks at what leaving them out hides.
 
 # COMMAND ----------
 
 import pandas as pd
 
-preds = spark.table(tbl("gold_test_predictions")).toPandas()
+test_preds = spark.table(tbl("gold_test_predictions")).toPandas()
+val_preds = spark.table(tbl("gold_validation_predictions")).toPandas()
 
-drug_order = preds[["antibiotic_slug", "antibiotic", "spectrum_rank"]].drop_duplicates().sort_values("spectrum_rank")
+drug_order = (test_preds[["antibiotic_slug", "antibiotic", "spectrum_rank"]].drop_duplicates()
+              .sort_values("spectrum_rank"))
 DRUGS = list(drug_order["antibiotic_slug"])
 DRUG_LABEL = dict(zip(drug_order["antibiotic_slug"], drug_order["antibiotic"]))
 
 
-def grid(column):
-    return preds.pivot(index="order_proc_id_coded", columns="antibiotic_slug", values=column)[DRUGS]
+def grids(preds, name):
+    """(P_model, P_antibiogram, R) for the cultures in `preds` that have all 7 drugs tested."""
+    def grid(column):
+        return preds.pivot(index="order_proc_id_coded", columns="antibiotic_slug", values=column)[DRUGS]
+
+    complete = grid("resistant").dropna().index          # cultures with all 7 results
+    print(f"{name}: {len(complete):,} of {preds['order_proc_id_coded'].nunique():,} cultures "
+          f"have all {len(DRUGS)} drugs tested")
+    return (grid("p_resistant").loc[complete].to_numpy(dtype=float),
+            grid("p_resistant_antibiogram").loc[complete].to_numpy(dtype=float),
+            grid("resistant").loc[complete].to_numpy(dtype=int))
 
 
-complete = grid("resistant").dropna().index          # cultures with all 7 results
-P_model = grid("p_resistant").loc[complete].to_numpy(dtype=float)
-P_antibiogram = grid("p_resistant_antibiogram").loc[complete].to_numpy(dtype=float)
-R = grid("resistant").loc[complete].to_numpy(dtype=int)
+P_model, P_antibiogram, R = grids(test_preds, "test")
+P_model_val, _, R_val = grids(val_preds, "validation")
 
-print(f"{len(complete):,} of {preds['order_proc_id_coded'].nunique():,} test cultures have all 7 drugs tested")
 display(pd.DataFrame({
     "antibiotic": [DRUG_LABEL[d] for d in DRUGS],
     "antibiogram_success_pct": (100 * (1 - P_antibiogram[0])).round(1),
@@ -169,8 +185,16 @@ display(pd.DataFrame({
 # MAGIC %md
 # MAGIC ## 5. The headline: same safety, less broad-spectrum use
 # MAGIC Section 4 compares the policies at the same *target*, but they can end up with different failure
-# MAGIC rates. A fairer comparison: find the model setting that fails **no more often** than the
-# MAGIC antibiogram, then compare how much broad-spectrum antibiotic each one uses.
+# MAGIC rates. A fairer comparison matches them on failure rate, in two steps:
+# MAGIC
+# MAGIC 1. **Choose the setting on 2021.** The antibiogram recommends one drug to everyone. On the
+# MAGIC    validation cultures, find the model setting that fails **no more often** than giving everyone
+# MAGIC    that drug, while using the least broad-spectrum antibiotic.
+# MAGIC 2. **Report on 2022+.** Apply that setting, unchanged, to the test cultures and compare both
+# MAGIC    policies there.
+# MAGIC
+# MAGIC Because the setting isn't tuned on the test years, the two failure rates on 2022+ will be close
+# MAGIC but not identical. Report both numbers as they come out.
 # MAGIC
 # MAGIC **Be precise about what this shows:** it compares the same decision rule fed with
 # MAGIC population-level numbers (the antibiogram) versus personal predictions. Real doctors already
@@ -180,16 +204,31 @@ display(pd.DataFrame({
 # COMMAND ----------
 
 baseline = policy_outcomes(choice_antibiogram, R, DRUGS)
-matched = matched_model_policy(P_model, R, DRUGS, baseline["failure_pct"])
+
+# Step 1: choose the model setting on the validation cultures. The yardstick is the drug the
+# antibiogram policy recommends on the test years (it gives everyone the same one), so both steps
+# compare against the same drug even if the antibiogram's pick would have differed a year earlier.
+antibiogram_drug = int(choice_antibiogram[0])
+baseline_val = policy_outcomes(np.full(len(R_val), antibiogram_drug), R_val, DRUGS)
+matched = matched_model_policy(P_model_val, R_val, DRUGS, baseline_val["failure_pct"])
 
 if matched is None:
-    print("No model setting matches the antibiogram's failure rate.")
+    print("No model setting matches the antibiogram's failure rate on the validation cultures.")
 else:
-    matched_success, matched_out = matched
+    matched_success, matched_val_out = matched
+    print("Step 1, choosing the setting on the validation cultures:")
+    display(pd.DataFrame([
+        {"policy": f"antibiogram's drug for everyone ({DRUG_LABEL[DRUGS[antibiogram_drug]]})", **baseline_val},
+        {"policy": f"model at {matched_success:.1%} target (matched failure rate)", **matched_val_out},
+    ]))
+
+    # Step 2: apply that setting, unchanged, to the test cultures
     choice_matched = recommend(P_model, 1 - matched_success)
+    matched_out = policy_outcomes(choice_matched, R, DRUGS)
+    print("Step 2, the result on the test cultures:")
     display(pd.DataFrame([
         {"policy": f"antibiogram at {TARGET_SUCCESS:.0%} target", **baseline},
-        {"policy": f"model at {matched_success:.1%} target (matched failure rate)", **matched_out},
+        {"policy": f"model at {matched_success:.1%} target (chosen on validation)", **matched_out},
     ]))
     display(pd.DataFrame({
         "antibiotic": [DRUG_LABEL[d] for d in DRUGS],
@@ -197,20 +236,99 @@ else:
         "model_pct_recommended": list(drug_mix(choice_matched, DRUGS).values()),
     }))
     HEADLINE = (
-        f"With no more treatment failures than today's antibiogram ({matched_out['failure_pct']}% vs "
-        f"{baseline['failure_pct']}%), the model recommends a broad-spectrum antibiotic for "
-        f"{matched_out['broad_pct']}% of patients instead of {baseline['broad_pct']}%, and a "
-        f"narrow-spectrum one for {matched_out['narrow_pct']}% instead of {baseline['narrow_pct']}%."
+        f"With a setting chosen on earlier data to match today's antibiogram, the model's "
+        f"recommendation failed for {matched_out['failure_pct']}% of test patients versus "
+        f"{baseline['failure_pct']}% for the antibiogram, while recommending a broad-spectrum "
+        f"antibiotic for {matched_out['broad_pct']}% of patients instead of {baseline['broad_pct']}%, "
+        f"and a narrow-spectrum one for {matched_out['narrow_pct']}% instead of {baseline['narrow_pct']}%."
     )
     print(HEADLINE)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. The full trade-off (chart for the slides)
+# MAGIC ## 6. Caveat: the cultures that were left out
+# MAGIC Everything above only scores cultures where the lab tested **all 7 drugs**. The ones left out are
+# MAGIC not a random sample: a result is usually missing because of *which organism grew*, and those
+# MAGIC organisms tend to be the resistant ones. A doctor can't leave these patients out, because the
+# MAGIC organism isn't known when the antibiotic is chosen. So the failure rates above describe the
+# MAGIC easier-to-score patients, and the tables below show how big the gap is.
+# MAGIC
+# MAGIC - **a) By drug:** how often each drug has no result among the left-out cultures, and how
+# MAGIC   resistant they are where it was tested, next to the cultures we kept.
+# MAGIC - **b) By organism:** what grew in the left-out cultures.
+# MAGIC - **c) The antibiogram on every culture:** the antibiogram gives everyone one drug, so we can
+# MAGIC   bound its failure rate over *all* test cultures by counting a missing result once as "worked"
+# MAGIC   and once as "failed". The truth is somewhere in between.
+# MAGIC
+# MAGIC The model can't be bounded the same way yet: notebook 03 only predicts for (culture, drug) pairs
+# MAGIC that have a lab result, so the rule can't walk all 7 drugs for these cultures.
+# MAGIC
+# MAGIC Not shown here: about 1% of positive urine cultures have a result for *none* of the 7 drugs
+# MAGIC (mostly Group B strep), so they never reach the training table at all.
+
+# COMMAND ----------
+
+from pyspark.sql import functions as F
+
+results = test_preds.pivot(index="order_proc_id_coded", columns="antibiotic_slug", values="resistant")[DRUGS]
+kept = results[results.notna().all(axis=1)]
+left_out = results[results.isna().any(axis=1)]
+print(f"{len(left_out):,} of {len(results):,} test cultures ({len(left_out) / len(results):.1%}) are left out")
+
+# a) by drug
+display(pd.DataFrame({
+    "antibiotic": [DRUG_LABEL[d] for d in DRUGS],
+    "left_out_no_result_pct": (100 * left_out.isna().mean()).round(1).to_numpy(),
+    "left_out_resistant_pct_where_tested": (100 * left_out.mean()).round(1).to_numpy(),
+    "kept_resistant_pct": (100 * kept.mean()).round(1).to_numpy(),
+}))
+
+# b) by organism (a culture that grew two organisms is listed as "A + B")
+organisms = (
+    spark.table(tbl("bronze_cohort"))
+    .where(F.col("organism").isNotNull() & F.col("order_proc_id_coded").isin(list(left_out.index)))
+    .select("order_proc_id_coded", "organism")
+    .distinct()
+    .toPandas()
+)
+grew = organisms.groupby("order_proc_id_coded")["organism"].apply(lambda names: " + ".join(sorted(names)))
+top_organisms = grew.value_counts().head(10)
+display(pd.DataFrame({
+    "organism": top_organisms.index,
+    "left_out_cultures": top_organisms.to_numpy(),
+    "pct_of_left_out": (100 * top_organisms / len(left_out)).round(1).to_numpy(),
+}))
+
+# c) the antibiogram's failure rate over every test culture
+antibiogram_result = results[DRUGS[antibiogram_drug]]          # 1 = resistant, NaN = no result
+LEFT_OUT = {
+    "left_out_cultures": int(len(left_out)),
+    "left_out_pct": round(100 * len(left_out) / len(results), 1),
+    "antibiogram_drug_no_result": int(antibiogram_result.isna().sum()),
+    "antibiogram_failure_pct_best_case": round(100 * float((antibiogram_result == 1).mean()), 2),
+    "antibiogram_failure_pct_worst_case": round(
+        100 * float(((antibiogram_result == 1) | antibiogram_result.isna()).mean()), 2),
+}
+display(pd.DataFrame([
+    {"cultures scored": "only those with all 7 results (used above)", "cultures": len(kept),
+     "antibiogram_failure_pct": baseline["failure_pct"]},
+    {"cultures scored": "all, a missing result counted as worked", "cultures": len(results),
+     "antibiogram_failure_pct": LEFT_OUT["antibiogram_failure_pct_best_case"]},
+    {"cultures scored": "all, a missing result counted as failed", "cultures": len(results),
+     "antibiogram_failure_pct": LEFT_OUT["antibiogram_failure_pct_worst_case"]},
+]))
+print(f"{DRUG_LABEL[DRUGS[antibiogram_drug]]} (the antibiogram's drug) has no result for "
+      f"{LEFT_OUT['antibiogram_drug_no_result']:,} test cultures.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 7. The full trade-off (chart for the slides)
 # MAGIC Each point is one setting of the rule, from "at least 70% likely to work" to "at least 99%".
 # MAGIC **Down and to the left is better:** fewer failures *and* less broad-spectrum use. Wherever the
 # MAGIC model's line sits below the antibiogram's, the model gets the same safety with fewer broad drugs.
+# MAGIC The two large dots are the policies compared in section 5.
 
 # COMMAND ----------
 
@@ -245,14 +363,14 @@ display(tradeoff[tradeoff["target_success"].isin([0.80, 0.85, 0.90, 0.95])])
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. Example patients
+# MAGIC ## 8. Example patients
 # MAGIC What a doctor would see for a few test cultures: each drug's predicted chance of working, the
 # MAGIC recommendation at the 90% target, and whether that drug really worked.
 
 # COMMAND ----------
 
 rng = np.random.default_rng(0)
-examples = rng.choice(len(complete), size=6, replace=False)
+examples = rng.choice(len(R), size=6, replace=False)
 rows = []
 for i in examples:
     row = {DRUG_LABEL[d]: f"{100 * (1 - P_model[i, j]):.0f}%" for j, d in enumerate(DRUGS)}
@@ -265,7 +383,7 @@ display(pd.DataFrame(rows))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 8. Save and log the results
+# MAGIC ## 9. Save and log the results
 # MAGIC The trade-off table goes to `workspace.armd.gold_policy_tradeoff` (handy for the demo app and
 # MAGIC slides), and the headline numbers and chart are logged to the same MLflow experiment as notebook 03.
 
@@ -282,16 +400,24 @@ import mlflow
 user = spark.sql("SELECT current_user()").first()[0]
 mlflow.set_experiment(f"/Users/{user}/{EXPERIMENT_NAME}")
 with mlflow.start_run(run_name="recommendation_policy"):
-    mlflow.log_params({"target_success": TARGET_SUCCESS, "test_cultures": len(complete),
+    mlflow.log_params({"target_success": TARGET_SUCCESS, "test_cultures": len(R),
+                       "validation_cultures": len(R_val),
                        "narrow_drugs": ",".join(NARROW_DRUGS), "broad_drugs": ",".join(BROAD_DRUGS)})
-    for name, out in [("antibiogram", baseline), ("model_at_target", policy_outcomes(choice_model, R, DRUGS))]:
+    for name, out in [("antibiogram", baseline), ("model_at_target", policy_outcomes(choice_model, R, DRUGS)),
+                      ("antibiogram_validation", baseline_val)]:
         for k, v in out.items():
             mlflow.log_metric(f"{name}.{k}", v)
     if matched is not None:
+        # the setting was chosen on the validation cultures; model_matched.* are its test results
         mlflow.log_param("matched_target_success", matched_success)
+        mlflow.log_param("antibiogram_drug", DRUGS[antibiogram_drug])
         for k, v in matched_out.items():
             mlflow.log_metric(f"model_matched.{k}", v)
+        for k, v in matched_val_out.items():
+            mlflow.log_metric(f"model_matched_validation.{k}", v)
         mlflow.set_tag("headline", HEADLINE)
+    for k, v in LEFT_OUT.items():       # the caveat from section 6
+        mlflow.log_metric(f"left_out.{k}", v)
     mlflow.log_figure(fig, "tradeoff_chart.png")
     mlflow.log_table(tradeoff, artifact_file="tradeoff.json")
 

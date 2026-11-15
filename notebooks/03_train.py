@@ -9,7 +9,7 @@
 # MAGIC
 # MAGIC | Model | What it does | Why it's here |
 # MAGIC |---|---|---|
-# MAGIC | **Antibiogram** | Gives every patient the hospital's overall resistance rate for that drug | What hospitals use today. The model must beat this |
+# MAGIC | **Antibiogram** | Gives every patient the hospital's overall resistance rate for that drug, measured over the most recent training year | What hospitals use today (they rebuild it every year). The model must beat this |
 # MAGIC | **Prior-resistance rule** | Two rates: one for patients resistant to this drug in the past year, one for everyone else | The obvious rule a careful doctor would apply. Shows whether ML adds anything beyond it |
 # MAGIC | **Logistic regression** | A weighted sum of all features | Simple and explainable |
 # MAGIC | **Gradient boosting** | Hundreds of small decision trees added together | Usually the most accurate on tables like ours; your paper found tree-based models did best |
@@ -35,6 +35,8 @@
 # MAGIC - Every run logged in **MLflow** (scores, settings, the models).
 # MAGIC - The final model registered in **Unity Catalog** as `workspace.armd.urine_resistance_model`.
 # MAGIC - Test-year predictions saved to `workspace.armd.gold_test_predictions` for notebook 04.
+# MAGIC - 2021 validation predictions saved to `workspace.armd.gold_validation_predictions`, so notebook
+# MAGIC   04 can choose its settings without looking at the test years.
 
 # COMMAND ----------
 
@@ -53,6 +55,11 @@ def tbl(name: str) -> str:
 
 VALIDATION_YEAR = 2021   # Step A: train on years before this, compare on this year
 SEED = 42                # makes the gradient-boosting results repeatable
+
+# The antibiogram baseline only uses the most recent year(s) of its training data. Real hospital
+# antibiograms are rebuilt every year, and resistance drifts, so an average over every year since
+# 2008 would be a stale (and unrealistically weak or strong) baseline.
+ANTIBIOGRAM_YEARS = 1
 
 # Labs and vital signs are left OUT by default, for two reasons:
 #  1. The dataset doesn't say whether the 14-day lab window can include days after the culture was
@@ -119,10 +126,12 @@ def make_model(kind):
     raise ValueError(kind)
 
 
-def fit_and_predict(kind, X_train, y_train, X_eval, prior_col):
+def fit_and_predict(kind, X_train, y_train, year_train, X_eval, prior_col):
     """Train one approach and return (fitted model or None, predicted chance of resistance)."""
     if kind == "antibiogram":
-        return None, np.full(len(X_eval), y_train.mean())
+        # the resistance rate over the last ANTIBIOGRAM_YEARS year(s) of the training data
+        recent = year_train > year_train.max() - ANTIBIOGRAM_YEARS
+        return None, np.full(len(X_eval), y_train[recent].mean())
     if kind == "prior_resistance_rule":
         had = X_train[:, prior_col] == 1
         rate_had = y_train[had].mean() if had.any() else y_train.mean()
@@ -143,7 +152,7 @@ def evaluate(y, p):
             "brier": round(float(brier_score_loss(y, p)), 4)}
 
 
-def compare_models(X, y, drug, features, drugs_in_order, train_mask, eval_mask, kinds):
+def compare_models(X, y, drug, year, features, drugs_in_order, train_mask, eval_mask, kinds):
     """Train every approach in `kinds` for every drug. Returns (score rows, predictions)."""
     rows, predictions = [], {}
     for d in drugs_in_order:
@@ -151,7 +160,7 @@ def compare_models(X, y, drug, features, drugs_in_order, train_mask, eval_mask, 
         test = (drug == d) & eval_mask
         prior_col = features.index(f"prior_resist_{d}")
         for kind in kinds:
-            model, p = fit_and_predict(kind, X[train], y[train], X[test], prior_col)
+            model, p = fit_and_predict(kind, X[train], y[train], year[train], X[test], prior_col)
             rows.append({"antibiotic": d, "model": kind, **evaluate(y[test], p)})
             predictions[(d, kind)] = {"rows": np.flatnonzero(test), "p": p, "model": model}
     return rows, predictions
@@ -182,7 +191,7 @@ def calibration_table(y, p, bins=10):
 
 # MAGIC %md
 # MAGIC ## 3. Load the training table
-# MAGIC About 505,000 rows: small enough to work with in memory. Features become one numeric table `X`,
+# MAGIC About 509,000 rows: small enough to work with in memory. Features become one numeric table `X`,
 # MAGIC with missing values as NaN.
 
 # COMMAND ----------
@@ -220,8 +229,8 @@ print("Drugs:", ", ".join(DRUG_LABEL[d] for d in DRUGS))
 step_a_train = (~is_test) & (year < VALIDATION_YEAR)
 step_a_eval = (~is_test) & (year == VALIDATION_YEAR)
 
-val_rows, _ = compare_models(X, y, drug, FEATURES, DRUGS, step_a_train, step_a_eval,
-                             BASELINES + ML_MODELS)
+val_rows, val_predictions = compare_models(X, y, drug, year, FEATURES, DRUGS, step_a_train,
+                                           step_a_eval, BASELINES + ML_MODELS)
 display(pd.DataFrame(val_rows))
 display(pd.DataFrame(average_by_model(val_rows)))
 
@@ -240,7 +249,7 @@ print(f"Chosen approach (highest average AUROC on 2021): {BEST_MODEL}")
 
 # COMMAND ----------
 
-with_rows, _ = compare_models(X_with_labs, y, drug, FEATURES_WITH_LABS, DRUGS, step_a_train,
+with_rows, _ = compare_models(X_with_labs, y, drug, year, FEATURES_WITH_LABS, DRUGS, step_a_train,
                               step_a_eval, ["gradient_boosting"])
 without = {r["antibiotic"]: r["auroc"] for r in val_rows if r["model"] == "gradient_boosting"}
 display(pd.DataFrame([
@@ -263,7 +272,7 @@ import mlflow
 user = spark.sql("SELECT current_user()").first()[0]
 mlflow.set_experiment(f"/Users/{user}/{EXPERIMENT_NAME}")
 
-test_rows, test_predictions = compare_models(X, y, drug, FEATURES, DRUGS, ~is_test, is_test,
+test_rows, test_predictions = compare_models(X, y, drug, year, FEATURES, DRUGS, ~is_test, is_test,
                                              BASELINES + ML_MODELS)
 test_table = pd.DataFrame(test_rows)
 summary_table = pd.DataFrame(average_by_model(test_rows))
@@ -272,6 +281,7 @@ with mlflow.start_run(run_name=f"final_{BEST_MODEL}") as run:
     mlflow.log_params({
         "chosen_model": BEST_MODEL, "use_labs_vitals": USE_LABS_VITALS,
         "n_features": len(FEATURES), "train_years": f"2008-{VALIDATION_YEAR}", "test_years": "2022+",
+        "antibiogram_years": ANTIBIOGRAM_YEARS,
     })
     for r in test_rows:
         for metric in ("auroc", "auprc", "brier"):
@@ -306,30 +316,42 @@ display(pd.DataFrame(calibration_rows))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. Save the test-year predictions for notebook 04
-# MAGIC One row per (test culture, antibiotic): the true answer, the chosen model's predicted chance of
+# MAGIC ## 7. Save the predictions for notebook 04
+# MAGIC One row per (culture, antibiotic): the true answer, the chosen model's predicted chance of
 # MAGIC resistance, and the antibiogram's (the baseline notebook 04 compares against).
+# MAGIC
+# MAGIC Two tables are saved:
+# MAGIC - **`gold_test_predictions`**: the 2022+ test cultures, scored by the models trained on 2008-2021.
+# MAGIC - **`gold_validation_predictions`**: the 2021 cultures, scored by the Step A models trained on
+# MAGIC   2008-2020. Notebook 04 chooses its settings on these, so the test years are only used to
+# MAGIC   report the result, never to tune it.
 
 # COMMAND ----------
 
-pred_frames = []
-for d in DRUGS:
-    model_pred = test_predictions[(d, BEST_MODEL)]
-    base_pred = test_predictions[(d, "antibiogram")]
-    part = pdf.iloc[model_pred["rows"]][
-        ["order_proc_id_coded", "anon_id", "order_year", "antibiotic", "antibiotic_slug",
-         "spectrum_rank", "resistant"]].copy()
-    part["p_resistant"] = model_pred["p"]
-    part["p_resistant_antibiogram"] = base_pred["p"]
-    pred_frames.append(part)
+def prediction_frame(predictions):
+    """The chosen model's and the antibiogram's predictions for one set of cultures."""
+    frames = []
+    for d in DRUGS:
+        model_pred = predictions[(d, BEST_MODEL)]
+        base_pred = predictions[(d, "antibiogram")]
+        part = pdf.iloc[model_pred["rows"]][
+            ["order_proc_id_coded", "anon_id", "order_year", "antibiotic", "antibiotic_slug",
+             "spectrum_rank", "resistant"]].copy()
+        part["p_resistant"] = model_pred["p"]
+        part["p_resistant_antibiogram"] = base_pred["p"]
+        frames.append(part)
+    return pd.concat(frames, ignore_index=True)
 
-predictions_pdf = pd.concat(pred_frames, ignore_index=True)
-(
-    spark.createDataFrame(predictions_pdf)
-    .write.mode("overwrite").option("overwriteSchema", True)
-    .saveAsTable(tbl("gold_test_predictions"))
-)
-print(f"Saved {len(predictions_pdf):,} rows to {tbl('gold_test_predictions')}")
+
+for table, predictions in [("gold_test_predictions", test_predictions),
+                           ("gold_validation_predictions", val_predictions)]:
+    predictions_pdf = prediction_frame(predictions)
+    (
+        spark.createDataFrame(predictions_pdf)
+        .write.mode("overwrite").option("overwriteSchema", True)
+        .saveAsTable(tbl(table))
+    )
+    print(f"Saved {len(predictions_pdf):,} rows to {tbl(table)}")
 
 # COMMAND ----------
 

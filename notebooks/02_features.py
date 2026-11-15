@@ -67,6 +67,15 @@ NOT_SUSCEPTIBLE = ["resistant", "intermediate", "non susceptible", "susceptible 
 SUSCEPTIBLE = ["susceptible"]
 # Anything else ("Inconclusive", "See Comment", missing...) is dropped.
 
+# Intrinsic resistance that the dataset's own implied-susceptibility rules leave out. Labs don't
+# test these combinations because the organism is always resistant, so without a rule the result
+# is simply missing. Each entry: (text the organism name must contain, drugs it always resists).
+# The dataset's rules already mark Pseudomonas aeruginosa as resistant to cefazolin and
+# ceftriaxone; these two complete the picture. Have a clinician confirm any rule added here.
+EXTRA_INTRINSIC_RESISTANCE = [
+    ("PSEUDOMONAS AERUGINOSA", ["Nitrofurantoin", "Trimethoprim/Sulfamethoxazole"]),
+]
+
 
 def slug(text: str) -> str:
     """'Piperacillin/Tazobactam' -> 'piperacillin_tazobactam' (safe for column names)."""
@@ -110,12 +119,17 @@ display(orders.groupBy("split").count().orderBy("split"))
 # MAGIC %md
 # MAGIC ## 3. Build the labels: was the infection resistant to each antibiotic?
 # MAGIC
-# MAGIC Results come from two tables, and we need both:
+# MAGIC Results come from two tables plus a short list of our own rules, and we need all three:
 # MAGIC - **cohort**: the results the lab actually reported.
 # MAGIC - **implied susceptibility**: extra results the lab didn't report but that follow from standard
 # MAGIC   rules (for example, an organism that is naturally resistant to a drug). This table is *not* a
 # MAGIC   full copy of the lab results: it has only ~8,000 trimethoprim/sulfamethoxazole rows where the
 # MAGIC   cohort has ~103,000, so using it alone would almost wipe out that drug.
+# MAGIC - **extra intrinsic-resistance rules** (`EXTRA_INTRINSIC_RESISTANCE` in the settings): cases the
+# MAGIC   dataset's rules miss. Pseudomonas aeruginosa is always resistant to nitrofurantoin and
+# MAGIC   trimethoprim/sulfamethoxazole, so the lab never tests them and no result exists. Filling them
+# MAGIC   in as resistant gives about 3,800 more labelled rows, and means a culture that grew
+# MAGIC   Pseudomonas alongside another organism correctly counts as resistant to those two drugs.
 # MAGIC
 # MAGIC Some cultures grow more than one organism. The drug only works if it works on **all** of them,
 # MAGIC so the culture counts as resistant if **any** organism was resistant.
@@ -140,8 +154,27 @@ implied_results = spark.table(tbl("bronze_implied_susceptibility")).select(
     F.lower(F.trim(F.coalesce("susceptibility", "implied_susceptibility"))).alias("result"),
 )
 
+# One "resistant" row per (culture, organism, drug) covered by an extra intrinsic-resistance rule
+organisms_grown = (
+    spark.table(tbl("bronze_cohort"))
+    .where(F.col("organism").isNotNull())
+    .select("order_proc_id_coded", "organism")
+    .distinct()
+)
+rule_results = reduce(
+    lambda a, b: a.unionByName(b),
+    [
+        organisms_grown.where(F.upper(F.col("organism")).like(f"%{pattern.upper()}%")).select(
+            "order_proc_id_coded", "organism",
+            F.lit(drug.lower()).alias("abx_lower"), F.lit("resistant").alias("result"),
+        )
+        for pattern, drugs in EXTRA_INTRINSIC_RESISTANCE
+        for drug in drugs
+    ],
+)
+
 labels = (
-    lab_results.unionByName(implied_results)
+    lab_results.unionByName(implied_results).unionByName(rule_results)
     .join(F.broadcast(abx_lookup.select("abx_lower")), "abx_lower")         # keep target drugs only
     .join(orders.select("order_proc_id_coded"), "order_proc_id_coded")      # keep our cultures only
     .withColumn(
@@ -401,7 +434,7 @@ print(f"OK: {total:,} rows, each a unique (culture, antibiotic) pair")
 
 # MAGIC %md
 # MAGIC **b) Resistance rates by antibiotic and split.** A full run of this notebook gave these overall
-# MAGIC rates: nitrofurantoin ~21%, trimethoprim/sulfamethoxazole ~25%, cefazolin ~21%,
+# MAGIC rates: nitrofurantoin ~23%, trimethoprim/sulfamethoxazole ~27%, cefazolin ~21%,
 # MAGIC ciprofloxacin ~21%, ceftriaxone ~15%, piperacillin/tazobactam ~4.5%, meropenem ~0.5%. Each
 # MAGIC drug should be within a point or two of these; a value far off means something is wrong.
 # MAGIC
