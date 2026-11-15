@@ -6,9 +6,9 @@ registered by `notebooks/03_train.py`.
 Each clinician signs in with their own username and password and sees only the patients
 assigned to them. Screens, from the sidebar:
 
-- **Dashboard**: the landing page. Today's worklist, cases needing attention, recent activity,
-  and pending cultures. Apart from the clinician's name it shows sample data for now (written
-  out at the top of `dashboard.py`).
+- **Dashboard**: the landing page, read from the database for the clinician's patients:
+  today's counts, patients needing reassessment, cultures awaiting a result or review, and a
+  7-day stewardship snapshot. Every count, row and "See all" opens the screen behind it.
 - **Clinical Assessment**: opens on the list of the clinician's patients. Selecting one shows
   their details from the database, four pre-checks (symptoms, allergies, kidney function,
   pregnancy), each antibiotic's predicted chance of working, and the pick. The clinician accepts
@@ -38,7 +38,7 @@ assigned to them. Screens, from the sidebar:
 | File | What it does |
 |---|---|
 | `app.py` | The frame around every screen (sign-in, sidebar, top bar) and the clinical assessment. |
-| `dashboard.py` | The dashboard and its sample data. |
+| `dashboard.py` | The dashboard. |
 | `culture_results.py` | The culture worklist and the page for one culture. |
 | `follow_up.py` | The follow-up queue and the page for one patient's follow-up. |
 | `analytics.py` | The stewardship analytics page and the counting behind it. |

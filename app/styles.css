@@ -287,8 +287,6 @@ button[data-variant="pills"][data-selected="true"] * { color: #fff !important; }
   .st-key-dash [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { width: 100% !important; flex: 0 0 auto !important; }
 }
 /* requires attention and pending cultures share one fixed height; their rows scroll inside the card */
-.fx-dcard-fixed { height: 26rem; display: flex; flex-direction: column; }
-.fx-dcard-fixed .fx-drows { flex: 1; min-height: 0; overflow-y: auto; padding-right: .25rem; }
 .stApp:has([data-testid="stExpandSidebarButton"]) [data-testid="stMainBlockContainer"] { padding-top: 3.4rem; }
 .st-key-dash [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] > [data-testid="stVerticalBlock"] { gap: .5rem; }
 button[data-variant="pills"] { border-radius: 0 !important; }
@@ -457,3 +455,52 @@ button[data-variant="pills"] { border-radius: 0 !important; }
 .st-key-accept button, .st-key-override_save button { background: var(--fx-navy); border-color: var(--fx-navy); }
 .st-key-accept button:hover, .st-key-override_save button:hover:not(:disabled) { background: var(--fx-teal); border-color: var(--fx-teal); }
 .st-key-an_decision_links, .st-key-an_follow_links { gap: .5rem !important; flex-wrap: wrap; }
+
+/* ---------- dashboard cards built from live data (rows and counts are buttons) ---------- */
+[class*="st-key-dcard_"] { background: #fff; border: 1px solid var(--fx-line); padding: 1rem; gap: .35rem !important; }
+[class*="st-key-dcard_"] .fx-dhead { margin-bottom: .4rem; }
+[class*="st-key-dcard_"] .fx-dlabel { margin-bottom: .3rem; }
+
+/* a list row: case number over its summary on the left, status on the right */
+[class*="st-key-drows_"] { gap: .35rem !important; }
+[class*="st-key-drows_"] button { background: var(--fx-head); border: 1px solid #eef1f6; padding: .6rem .8rem; }
+[class*="st-key-drows_"] button:hover { border-color: var(--fx-teal); background: var(--fx-teal-soft); color: var(--fx-ink); }
+[class*="st-key-drows_"] button > div, [class*="st-key-drows_"] button > div > span,
+[class*="st-key-drows_"] button [data-testid="stMarkdownContainer"] { width: 100%; }
+[class*="st-key-drows_"] button p { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: .75rem; row-gap: .1rem; align-items: center; text-align: left; }
+[class*="st-key-drows_"] button p strong { grid-column: 1; grid-row: 1; font-size: .88rem; font-weight: 700;
+  color: var(--fx-navy); font-variant-numeric: tabular-nums; }
+[class*="st-key-drows_"] button p span:first-of-type { grid-column: 1; grid-row: 2; font-size: .75rem;
+  color: var(--fx-muted) !important; line-height: 1.35; }
+[class*="st-key-drows_"] button p span:last-of-type { grid-column: 2; grid-row: 1 / 3; font-size: .74rem;
+  font-weight: 700; white-space: nowrap; }
+
+/* "See all": a quiet link, at the foot of a list or the top right of the snapshot */
+[class*="st-key-dsee_"] { align-self: flex-end; }
+[class*="st-key-dsee_"] button { flex-direction: row-reverse; color: var(--fx-teal); font-weight: 600; }
+[class*="st-key-dsee_"] button p { font-size: .8rem; font-weight: 600; }
+.st-key-dsnap_head { justify-content: space-between; }
+.st-key-dsnap_head .fx-dhead { margin-bottom: 0; }
+.fx-meter { margin-bottom: .55rem; }
+.fx-meter-top b i { font-style: normal; font-weight: 400; color: var(--fx-muted); margin-left: .3rem; }
+
+/* today's overview: each count is a button that opens its list */
+[class*="st-key-dstat_"] button { border: 1px solid; padding: .7rem .9rem; }
+[class*="st-key-dstat_"] button > div, [class*="st-key-dstat_"] button > div > span,
+[class*="st-key-dstat_"] button [data-testid="stMarkdownContainer"] { width: 100%; }
+[class*="st-key-dstat_"] button p { display: flex; align-items: center; justify-content: space-between;
+  font-size: .88rem; font-weight: 500; color: var(--fx-ink); }
+[class*="st-key-dstat_"] button p strong { font-family: "Plus Jakarta Sans", Inter, sans-serif;
+  font-size: 1.4rem; font-weight: 800; line-height: 1; }
+.st-key-dstat_amber button { background: var(--fx-amber-soft); border-color: #f1dcb4; } .st-key-dstat_amber strong { color: var(--fx-amber); }
+.st-key-dstat_teal button { background: var(--fx-teal-soft); border-color: #bfe6df; } .st-key-dstat_teal strong { color: #00796d; }
+.st-key-dstat_red button { background: var(--fx-red-soft); border-color: #f5cdd1; } .st-key-dstat_red strong { color: var(--fx-red); }
+[class*="st-key-dstat_"] button:hover { border-color: var(--fx-navy); color: var(--fx-ink); }
+/* the two list cards sit side by side at the same height, with "See all" at the foot */
+.st-key-dash_cards [data-testid="stColumn"] > [data-testid="stVerticalBlock"],
+.st-key-dash_cards [data-testid="stLayoutWrapper"]:has(> [class*="st-key-dcard_"]),
+.st-key-dash_cards [class*="st-key-dcard_"] { height: 100%; }
+.st-key-dash_cards [data-testid="stLayoutWrapper"]:has(> [class*="st-key-dsee_"]),
+.st-key-dash_cards [data-testid="stElementContainer"]:has(> [class*="st-key-dsee_"]),
+.st-key-dash_cards [class*="st-key-dsee_"] { margin-top: auto; }

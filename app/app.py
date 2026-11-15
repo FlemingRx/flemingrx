@@ -486,8 +486,10 @@ if "clinician" not in st.session_state:
 clinician = st.session_state["clinician"]
 assessment = st.Page(assessment_page, title="Clinical Assessment", url_path="assessment",
                      icon=":material/clinical_notes:")
-home = st.Page(lambda: dashboard.render(clinician), title="Dashboard", url_path="dashboard",
-               icon=":material/dashboard:", default=True)
+# The dashboard links to the other screens; they are defined below and looked up when it runs.
+home = st.Page(lambda: dashboard.render(clinician, {"cultures": cultures, "follow": follow,
+                                                    "analytics": stewardship}),
+               title="Dashboard", url_path="dashboard", icon=":material/dashboard:", default=True)
 cultures = st.Page(lambda: culture_results.render(clinician), title="Culture Results",
                    url_path="cultures", icon=":material/biotech:")
 follow = st.Page(lambda: follow_up.render(clinician), title="Follow-up", url_path="follow-up",

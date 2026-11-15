@@ -120,7 +120,7 @@ def render(clinician: dict, pages: dict):
 
     tiles = [("Total Assessments", "Recommendations produced", stats["assessments"], "navy"),
              ("Recommendation Acceptance", "Accepted, among assessments with a decision",
-              percent(stats["accepted"], stats["decided"]), "teal"),
+              percent(dict(stats["decisions"])["Accepted"], stats["decided"]), "teal"),
              ("Resistance Mismatch", "Among completed culture results",
               percent(stats["mismatches"], stats["resulted"]), "red"),
              ("Follow-up Completion", "Cases with documented follow-up",
