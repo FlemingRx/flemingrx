@@ -4,7 +4,8 @@ The tables:
   clinicians          one row per login (the password is stored as a salted hash, never as text)
   patients            one row per patient, holding the details the model needs
   clinician_patients  one row per (clinician, patient) pair, so a patient can have several clinicians
-  prescriptions       what the model recommended for a patient and what the clinician prescribed
+  prescriptions       what the model recommended for a patient, what the clinician prescribed, and
+                      whether that was an acceptance or an override (with the reason)
   cultures            one row per urine culture: what grew, and the clinician's review of the result
   susceptibilities    one row per culture and antibiotic tested: susceptible, intermediate or resistant
   follow_ups          one row per patient being followed after a prescription: why, what has been
@@ -57,6 +58,11 @@ patients = sa.Table(
     sa.Column("days_since_last_antibiotic", sa.Integer, nullable=False, default=366),
     sa.Column("prior_organisms", sa.JSON, nullable=False, default=list),       # past year
     sa.Column("recent_procedures", sa.JSON, nullable=False, default=list),     # last 90 days
+    # What the pre-checks look at (prechecks.py). Added later, so these can be empty.
+    sa.Column("symptoms", sa.JSON),              # urinary symptoms documented; [] = none
+    sa.Column("allergies", sa.JSON),             # allergy groups, keys of prechecks.ALLERGY_LABELS
+    sa.Column("egfr", sa.Integer),               # kidney function; empty = not on record
+    sa.Column("pregnancy", sa.String(32)),       # "Pregnant", "Not pregnant" or "Not applicable"
 )
 
 clinician_patients = sa.Table(
@@ -79,6 +85,10 @@ prescriptions = sa.Table(
     sa.Column("frequency", sa.String(64), nullable=False),         # e.g. "Twice daily"
     sa.Column("duration_days", sa.Integer, nullable=False),
     sa.Column("started_on", sa.Date, nullable=False),
+    # The clinician's decision on the recommendation. Added later, so these can be empty.
+    sa.Column("decision", sa.String(16)),                          # one of PRESCRIPTION_DECISIONS
+    sa.Column("override_reason", sa.String(64)),                   # one of OVERRIDE_REASONS
+    sa.Column("override_notes", sa.Text),
 )
 
 # A culture is "pending" until the lab reports (resulted_on, organism and colony count are empty
@@ -136,6 +146,9 @@ follow_ups = sa.Table(
 )
 
 RESULTS = ("Susceptible", "Intermediate", "Resistant")
+PRESCRIPTION_DECISIONS = ("Accepted", "Overridden")
+OVERRIDE_REASONS = ("Allergy or intolerance", "Kidney function", "Pregnancy",
+                    "Patient-specific considerations", "Clinician preference", "Other")
 FOLLOW_UP_REASONS = ("Culture resistance mismatch", "Symptoms worsening or not improving",
                      "Adverse drug reaction", "Treatment completion", "Other clinical concern",
                      "Follow-up pending")
@@ -226,7 +239,11 @@ def engine(url: str | None = None) -> sa.Engine:
 
 
 def init(url: str | None = None) -> None:
-    """Create the tables if they are missing, and add the demo data if there are no clinicians."""
+    """Bring the database up to date: missing tables and columns, then the demo data.
+
+    Safe to run every time the app starts. It only ever adds: tables, columns, and demo rows
+    that are not there yet. Nothing a clinician has recorded is changed or removed.
+    """
     import seed
 
     db = engine(url)
@@ -234,16 +251,34 @@ def init(url: str | None = None) -> None:
         with db.begin() as connection:
             connection.execute(sa.text(f'CREATE SCHEMA IF NOT EXISTS "{LAKEBASE_SCHEMA}"'))
     metadata.create_all(db)
+    _add_missing_columns(db)
     with db.begin() as connection:
         def empty(table):
             return connection.execute(sa.select(sa.func.count()).select_from(table)).scalar() == 0
 
-        if empty(clinicians):
-            seed.load(connection)
-        if empty(cultures):       # added after the first databases were filled, so checked by itself
+        seed.load(connection)     # adds only the clinicians and patients that are missing
+        if empty(cultures):
             seed.load_cultures(connection)
-        if empty(follow_ups):     # likewise
+        if empty(follow_ups):
             seed.load_follow_ups(connection)
+        seed.fill_new_columns(connection)
+
+
+def _add_missing_columns(db: sa.Engine) -> None:
+    """Add any column the tables above have gained since this database was created.
+
+    create_all only makes whole tables, so a column added to an existing table needs this. New
+    columns are always allowed to be empty, which is what makes adding them safe.
+    """
+    inspector = sa.inspect(db)
+    with db.begin() as connection:
+        for table in metadata.sorted_tables:
+            existing = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name not in existing:
+                    kind = column.type.compile(dialect=db.dialect)
+                    connection.execute(sa.text(
+                        f'ALTER TABLE {table.name} ADD COLUMN {column.name} {kind}'))
 
 
 # ----------------------------------------------------------------------------- passwords
@@ -368,6 +403,62 @@ def review_culture(clinician_id: int, culture_number: str, decision: str, notes:
         connection.execute(cultures.update().where(cultures.c.id == cases[0]["id"]).values(
             review_decision=decision, review_notes=notes.strip(), reviewed_by=clinician_id,
             reviewed_at=datetime.datetime.now()))
+    return True
+
+
+def prescriptions_for(clinician_id: int, url: str | None = None) -> list[dict]:
+    """Every prescription for this clinician's patients, each with its patient number."""
+    query = (sa.select(prescriptions, patients.c.patient_number)
+             .join(patients, patients.c.id == prescriptions.c.patient_id)
+             .join(clinician_patients, clinician_patients.c.patient_id == patients.c.id)
+             .where(clinician_patients.c.clinician_id == clinician_id)
+             .order_by(prescriptions.c.started_on, prescriptions.c.id))
+    with engine(url).connect() as connection:
+        return [dict(row) for row in connection.execute(query).mappings()]
+
+
+def prescription_for(clinician_id: int, patient_number: str, url: str | None = None) -> dict | None:
+    """This patient's most recent prescription, with the prescriber's name, or None if there isn't one."""
+    query = (sa.select(prescriptions, clinicians.c.name.label("prescriber"))
+             .join(patients, patients.c.id == prescriptions.c.patient_id)
+             .join(clinician_patients, clinician_patients.c.patient_id == patients.c.id)
+             .join(clinicians, clinicians.c.id == prescriptions.c.prescribed_by)
+             .where(clinician_patients.c.clinician_id == clinician_id,
+                    patients.c.patient_number == patient_number)
+             .order_by(prescriptions.c.started_on.desc(), prescriptions.c.id.desc()))
+    with engine(url).connect() as connection:
+        row = connection.execute(query).mappings().first()
+    return dict(row) if row else None
+
+
+def save_prescription(clinician_id: int, patient_number: str, recommended_drug: str, drug: str,
+                      regimen: tuple, reason: str | None = None, notes: str = "",
+                      url: str | None = None) -> bool:
+    """Record the clinician's decision on a recommendation as a new prescription.
+
+    Prescribing the recommended drug is an acceptance. Anything else is an override and needs a
+    reason. `regimen` is (dose, frequency, days). False if the patient isn't this clinician's or
+    already has a prescription.
+    """
+    accepted = drug == recommended_drug
+    if not accepted and reason not in OVERRIDE_REASONS:
+        raise ValueError("An override needs a reason from OVERRIDE_REASONS.")
+    dose, frequency, days = regimen
+    with engine(url).begin() as connection:
+        patient_id = connection.execute(
+            sa.select(patients.c.id)
+            .join(clinician_patients, clinician_patients.c.patient_id == patients.c.id)
+            .where(clinician_patients.c.clinician_id == clinician_id,
+                   patients.c.patient_number == patient_number)).scalar()
+        if patient_id is None or connection.execute(
+                sa.select(prescriptions.c.id).where(prescriptions.c.patient_id == patient_id)).first():
+            return False
+        connection.execute(prescriptions.insert().values(
+            patient_id=patient_id, prescribed_by=clinician_id, recommended_drug=recommended_drug,
+            drug=drug, dose=dose, frequency=frequency, duration_days=int(days),
+            started_on=datetime.date.today(), decision="Accepted" if accepted else "Overridden",
+            override_reason=None if accepted else reason,
+            override_notes=None if accepted else notes.strip()))
     return True
 
 

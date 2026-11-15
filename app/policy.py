@@ -21,6 +21,21 @@ NARROW_DRUGS = ["nitrofurantoin", "trimethoprim_sulfamethoxazole", "cefazolin"]
 BROAD_DRUGS = ["piperacillin_tazobactam", "meropenem"]
 
 
+# A usual adult regimen for each antibiotic: (dose, frequency, days). It is what gets recorded when
+# a clinician accepts or overrides a recommendation, as a starting point they can then adjust.
+# Simplified for the demo and not reviewed by a pharmacist: no adjustment for kidney function,
+# weight or the site and severity of infection.
+USUAL_REGIMENS = {
+    "nitrofurantoin": ("100 mg", "Twice daily", 5),
+    "trimethoprim_sulfamethoxazole": ("160/800 mg", "Twice daily", 3),
+    "cefazolin": ("1 g IV", "Every 8 hours", 7),
+    "ciprofloxacin": ("500 mg", "Twice daily", 7),
+    "ceftriaxone": ("1 g IV", "Once daily", 7),
+    "piperacillin_tazobactam": ("4.5 g IV", "Every 8 hours", 7),
+    "meropenem": ("1 g IV", "Every 8 hours", 7),
+}
+
+
 def drug_label(slug: str) -> str:
     return DRUG_LABELS.get(slug, slug.replace("_", " ").title())
 

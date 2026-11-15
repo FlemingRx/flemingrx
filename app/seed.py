@@ -13,6 +13,7 @@ and start the app again.
 import datetime
 
 import db
+import policy
 
 CLINICIANS = [
     {"username": "sarahmitchell", "name": "Dr. Sarah Mitchell", "role": "Infectious Disease",
@@ -26,7 +27,11 @@ CLINICIANS = [
 
 def _patient(number, clinicians, age_band, sex, care_setting, nursing_home=False, resistant_to=(),
              other_resistant_count=0, recent_antibiotic_classes=(), days_since_last_antibiotic=366,
-             prior_organisms=(), recent_procedures=()):
+             prior_organisms=(), recent_procedures=(), symptoms=("Dysuria", "Urinary frequency"),
+             allergies=(), egfr=88, pregnancy=None):
+    if pregnancy is None:     # only asked of women of childbearing age
+        of_age = age_band in ("18-24", "25-34", "35-44", "45-54")
+        pregnancy = "Not pregnant" if sex == "Female" and of_age else "Not applicable"
     return {
         "clinicians": clinicians,
         "row": {
@@ -36,6 +41,8 @@ def _patient(number, clinicians, age_band, sex, care_setting, nursing_home=False
             "recent_antibiotic_classes": list(recent_antibiotic_classes),
             "days_since_last_antibiotic": days_since_last_antibiotic,
             "prior_organisms": list(prior_organisms), "recent_procedures": list(recent_procedures),
+            "symptoms": list(symptoms), "allergies": list(allergies), "egfr": egfr,
+            "pregnancy": pregnancy,
         },
     }
 
@@ -48,7 +55,7 @@ PATIENTS = [
     _patient("PT-00391", ["sarahmitchell"], "75-84", "Male", "Hospital ward",
              resistant_to=["ciprofloxacin"], recent_antibiotic_classes=["fluoroquinolone"],
              days_since_last_antibiotic=60, prior_organisms=["escherichia", "enterococcus"],
-             recent_procedures=["urethral_catheter"]),
+             recent_procedures=["urethral_catheter"], symptoms=["Dysuria", "Fever"], egfr=61),
     _patient("PT-00399", ["sarahmitchell", "jokafor"], "35-44", "Female", "Outpatient clinic",
              resistant_to=["trimethoprim_sulfamethoxazole"],
              recent_antibiotic_classes=["sulfonamide"], days_since_last_antibiotic=60,
@@ -58,7 +65,8 @@ PATIENTS = [
                            "ciprofloxacin", "ceftriaxone"],
              other_resistant_count=3, recent_antibiotic_classes=["beta_lactam", "fluoroquinolone"],
              days_since_last_antibiotic=14, prior_organisms=["klebsiella", "escherichia"],
-             recent_procedures=["urethral_catheter"]),
+             recent_procedures=["urethral_catheter"], symptoms=["Fever", "Suprapubic pain"],
+             egfr=38),
     _patient("PT-00408", ["sarahmitchell", "jokafor"], "55-64", "Male", "Outpatient clinic",
              recent_antibiotic_classes=["nitrofuran"], days_since_last_antibiotic=60,
              prior_organisms=["proteus"], recent_procedures=["surgical_procedure"]),
@@ -68,7 +76,8 @@ PATIENTS = [
              nursing_home=True, resistant_to=["ciprofloxacin", "cefazolin"], other_resistant_count=1,
              recent_antibiotic_classes=["fluoroquinolone", "glycopeptide"],
              days_since_last_antibiotic=14, prior_organisms=["escherichia", "pseudomonas"],
-             recent_procedures=["urethral_catheter", "cvc"]),
+             recent_procedures=["urethral_catheter", "cvc"], symptoms=["Fever", "Flank pain"],
+             allergies=["sulfonamide"], egfr=52),
     _patient("PT-00403", ["jokafor"], "65-74", "Male", "Hospital ward",
              resistant_to=["cefazolin"], recent_antibiotic_classes=["beta_lactam"],
              days_since_last_antibiotic=14, prior_organisms=["enterococcus"],
@@ -82,26 +91,30 @@ PATIENTS = [
     _patient("PT-00421", ["praman"], "55-64", "Female", "Emergency department",
              resistant_to=["trimethoprim_sulfamethoxazole", "ciprofloxacin"],
              recent_antibiotic_classes=["fluoroquinolone"], days_since_last_antibiotic=14,
-             prior_organisms=["escherichia"], recent_procedures=["dialysis"]),
+             prior_organisms=["escherichia"], recent_procedures=["dialysis"], egfr=12),
+
+    # Four patients with no prescription yet, so the accept / override step can be shown. Between
+    # them they trip each of the pre-checks.
+    _patient("PT-00424", ["sarahmitchell"], "25-34", "Female", "Outpatient clinic",
+             symptoms=["Dysuria", "Urinary frequency", "Urgency"]),
+    _patient("PT-00427", ["sarahmitchell"], "75-84", "Female", "Outpatient clinic",
+             nursing_home=True, prior_organisms=["escherichia"], symptoms=[], egfr=64),
+    _patient("PT-00430", ["sarahmitchell", "jokafor"], "25-34", "Female", "Outpatient clinic",
+             resistant_to=["nitrofurantoin", "cefazolin"], prior_organisms=["escherichia"],
+             symptoms=["Dysuria", "Urgency"], allergies=["sulfonamide"], pregnancy="Pregnant"),
+    _patient("PT-00433", ["sarahmitchell", "praman"], "65-74", "Male", "Hospital ward",
+             resistant_to=["ciprofloxacin", "ceftriaxone"],
+             recent_antibiotic_classes=["fluoroquinolone"], days_since_last_antibiotic=14,
+             prior_organisms=["klebsiella"], recent_procedures=["urethral_catheter"],
+             symptoms=["Fever", "Suprapubic pain"], allergies=["penicillin"], egfr=24),
 ]
 
-
-# Usual adult regimens, used only to make the demo prescriptions look plausible.
-REGIMENS = {
-    "nitrofurantoin": ("100 mg", "Twice daily", 5),
-    "trimethoprim_sulfamethoxazole": ("160/800 mg", "Twice daily", 3),
-    "cefazolin": ("1 g IV", "Every 8 hours", 7),
-    "ciprofloxacin": ("500 mg", "Twice daily", 7),
-    "ceftriaxone": ("1 g IV", "Once daily", 7),
-    "piperacillin_tazobactam": ("4.5 g IV", "Every 8 hours", 7),
-    "meropenem": ("1 g IV", "Every 8 hours", 7),
-}
 
 # The antibiotics on the lab's panel, in the order of the S/R letters in CASES below.
 PANEL = ["ampicillin", "nitrofurantoin", "trimethoprim_sulfamethoxazole", "cefazolin",
          "ciprofloxacin", "ceftriaxone", "piperacillin_tazobactam", "meropenem"]
 
-# One prescription and one culture per patient:
+# One prescription and one culture for each of the first 13 patients:
 # (patient, culture number, model's recommendation at a 90% bar, drug prescribed, prescribed by,
 #  days since the culture was collected, specimen, organism, colony count, panel results, review)
 # The recommendations are what the model really returns for each fabricated patient.
@@ -140,20 +153,66 @@ CASES = [
 _RESULT = {"S": "Susceptible", "I": "Intermediate", "R": "Resistant"}
 
 
+# Why the clinician departed from the model for the demo's overridden prescriptions.
+OVERRIDES = {
+    "PT-00377": ("Clinician preference", "Uncomplicated cystitis; first-line oral agent preferred."),
+    "PT-00389": ("Patient-specific considerations", "Stable for a once-daily agent."),
+    "PT-00391": ("Clinician preference", "Oral step-down planned."),
+    "PT-00408": ("Patient-specific considerations", "Outpatient; oral agent needed."),
+    "PT-00410": ("Clinician preference", "Uncomplicated cystitis; first-line oral agent preferred."),
+    "PT-00409": ("Clinician preference", "Uncomplicated cystitis; first-line oral agent preferred."),
+    "PT-00415": ("Patient-specific considerations", "Once-daily dosing in the emergency department."),
+    "PT-00418": ("Clinician preference", "Oral agent for discharge."),
+    "PT-00421": ("Kidney function", "On dialysis; agent chosen with the renal team."),
+}
+
+
 def load(connection) -> None:
-    """Insert the clinicians, the patients, and who looks after whom."""
-    clinician_ids = {}
+    """Insert the clinicians and patients that are not in the database yet, and who looks after whom.
+
+    Run on every start: on an empty database it adds everything, and after CLINICIANS or PATIENTS
+    gains an entry it adds just that one.
+    """
+    clinician_ids = dict(connection.execute(
+        db.sa.select(db.clinicians.c.username, db.clinicians.c.id)).all())
     for person in CLINICIANS:
-        result = connection.execute(db.clinicians.insert().values(
-            username=person["username"], name=person["name"], role=person["role"],
-            password_hash=db.hash_password(person["password"])))
-        clinician_ids[person["username"]] = result.inserted_primary_key[0]
+        if person["username"] not in clinician_ids:
+            result = connection.execute(db.clinicians.insert().values(
+                username=person["username"], name=person["name"], role=person["role"],
+                password_hash=db.hash_password(person["password"])))
+            clinician_ids[person["username"]] = result.inserted_primary_key[0]
+    existing = set(connection.execute(db.sa.select(db.patients.c.patient_number)).scalars())
     for patient in PATIENTS:
+        if patient["row"]["patient_number"] in existing:
+            continue
         result = connection.execute(db.patients.insert().values(**patient["row"]))
         patient_id = result.inserted_primary_key[0]
         for username in patient["clinicians"]:
             connection.execute(db.clinician_patients.insert().values(
                 clinician_id=clinician_ids[username], patient_id=patient_id))
+
+
+def fill_new_columns(connection) -> None:
+    """Give demo rows that predate a column its demo value. Only ever fills empty values."""
+    new = ("symptoms", "allergies", "egfr", "pregnancy")
+    for patient in PATIENTS:
+        row = patient["row"]
+        connection.execute(db.patients.update()
+                           .where(db.patients.c.patient_number == row["patient_number"],
+                                  db.patients.c.symptoms.is_(None))
+                           .values({name: row[name] for name in new}))
+    # Demo prescriptions from before decisions were recorded: work the decision out from the drugs.
+    undecided = connection.execute(
+        db.sa.select(db.prescriptions.c.id, db.prescriptions.c.drug,
+                     db.prescriptions.c.recommended_drug, db.patients.c.patient_number)
+        .join(db.patients, db.patients.c.id == db.prescriptions.c.patient_id)
+        .where(db.prescriptions.c.decision.is_(None))).all()
+    for course_id, drug, recommended, patient_number in undecided:
+        accepted = drug == recommended
+        reason, notes = (None, None) if accepted else OVERRIDES.get(patient_number, ("Other", None))
+        connection.execute(db.prescriptions.update().where(db.prescriptions.c.id == course_id).values(
+            decision="Accepted" if accepted else "Overridden", override_reason=reason,
+            override_notes=notes))
 
 
 def load_cultures(connection) -> None:
@@ -171,7 +230,7 @@ def load_cultures(connection) -> None:
         if patient not in patient_ids:
             continue
         collected = today - datetime.timedelta(days=days_ago)
-        dose, frequency, duration = REGIMENS[drug]
+        dose, frequency, duration = policy.USUAL_REGIMENS[drug]
         connection.execute(db.prescriptions.insert().values(
             patient_id=patient_ids[patient], prescribed_by=clinician_ids[prescriber],
             recommended_drug=recommended, drug=drug, dose=dose, frequency=frequency,
@@ -191,7 +250,7 @@ def load_cultures(connection) -> None:
                 result=_RESULT[letter]))
 
 
-# One follow-up per patient:
+# One follow-up for each patient who has a prescription:
 # (patient, reason, why, where that came from, days since it was reported, queue status,
 #  symptom progression, treatment adherence, adverse reaction, additional notes, reassessment)
 # None means not documented yet. `reassessment` is (decision, notes, clinician) or None.

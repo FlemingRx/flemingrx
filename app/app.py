@@ -2,8 +2,7 @@
 
 This file is the frame around every screen (sign-in, sidebar, top bar, footer) and holds the
 clinical assessment: the signed-in clinician's patients, and for each one a recommended antibiotic.
-The dashboard is in dashboard.py, culture results in culture_results.py, follow-up in follow_up.py, the database in db.py. Screens that are planned but not built
-yet are listed in PLANNED below.
+The dashboard is in dashboard.py, culture results in culture_results.py, follow-up in follow_up.py, analytics in analytics.py, the database in db.py.
 
 Run locally with `streamlit run app.py` from this folder (see README.md for the two settings a
 local run needs). On Databricks it runs as a Databricks App using app.yaml.
@@ -21,12 +20,14 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+import analytics
 import culture_results
 import dashboard
 import follow_up
 import data
 import db
 import policy
+import prechecks
 from ui import card, patient_record
 
 HERE = pathlib.Path(__file__).parent
@@ -104,6 +105,14 @@ def patient_list(clinician: dict):
                            icon=":material/search:", label_visibility="collapsed",
                            key="patient_search", width=280)
     shown = [r for r in records if search.strip().lower() in r["patient_number"].lower()]
+    only = st.session_state.get("patient_filter")     # set when opened from the analytics page
+    if only:
+        shown = [r for r in shown if r["patient_number"] in only["numbers"]]
+        with st.container(horizontal=True, vertical_alignment="center", key="patient_filter_bar"):
+            st.markdown(f":material/filter_alt: Showing: **{only['label']}**")
+            if st.button("Show all patients", key="patient_filter_clear", type="tertiary"):
+                del st.session_state["patient_filter"]
+                st.rerun()
     if not shown:
         st.caption("No patients match.")
     with st.container(key="patientlist"):
@@ -168,18 +177,103 @@ def ladder_html(drugs, risks, picked: int, target: float) -> str:
     </div>"""
 
 
-def recommendation_panel(model, features, patient):
-    predictions = data.predict(model, features, patient)     # chance of resistance, narrowest first
-    drugs = list(predictions.index)
-    risks = list(predictions.to_numpy())
+CHECK_WORD = {"ok": "Clear", "unknown": "Not on record", "caution": "Check", "stop": "Stop and review"}
+
+
+def precheck_strip(record: dict, recommended: str):
+    """The four checks to make before acting on the recommendation, in a row above it."""
+    checks = prechecks.run(record, recommended)
+    cells = "".join(
+        f'<div class="fx-check fx-check-{check["level"]}">'
+        f'<span class="fx-eyebrow-dark">{check["name"]}</span>'
+        f'<b>{html.escape(check["value"])}</b>'
+        f'<i>{CHECK_WORD[check["level"]]}</i>'
+        f'<small>{html.escape(check["note"])}</small></div>' for check in checks)
+    st.html(f'<div class="fx-checks">{cells}</div>')
+    if checks[0]["level"] == "stop":      # the symptoms check: treatment may not be needed at all
+        st.html('<div class="fx-verdict fx-verdict-bad"><b>Treatment is usually not indicated</b>'
+                '<span>No urinary symptoms are documented. The recommendation below shows what the '
+                'model would choose if you decide to treat.</span></div>')
+
+
+def regimen_text(drug: str) -> str:
+    dose, frequency, days = policy.USUAL_REGIMENS[drug]
+    return f"{dose} · {frequency} · {days} days"
+
+
+def decision_card(clinician: dict, record: dict, drugs: list, recommended: str):
+    """Accept or override the recommendation, or show the prescription already on record."""
+    number = record["patient_number"]
+    course = db.prescription_for(clinician["id"], number)
+    with card("decision", "prescriptions", "Prescription"):
+        if course:
+            accepted = course["drug"] == course["recommended_drug"]
+            decision = ("Accepted the recommendation" if accepted else
+                        f"Overrode the recommendation ({policy.drug_label(course['recommended_drug'])})")
+            rows = [("Prescribed", policy.drug_label(course["drug"])),
+                    ("Dosage", f"{course['dose']} · {course['frequency']} · {course['duration_days']} days"),
+                    ("Decision", decision)]
+            if not accepted:
+                reason = course["override_reason"] or "Not recorded"
+                if course["override_notes"]:
+                    reason += f": {course['override_notes']}"
+                rows.append(("Reason for override", reason))
+            rows.append(("Prescribed by", f"{course['prescriber']} · "
+                                          f"{course['started_on'].strftime('%b %-d, %Y')}"))
+            st.html('<div class="fx-verdict fx-verdict-note"><b>A prescription has already been made '
+                    'for this patient</b></div>' + "".join(
+                        f'<div class="fx-kv"><span>{label}</span><b>{html.escape(value)}</b></div>'
+                        for label, value in rows))
+            return
+
+        st.caption(f"Accepting records {policy.drug_label(recommended)}, {regimen_text(recommended)}. "
+                   f"It is a usual adult regimen; adjust it for this patient as needed.")
+        overriding = st.session_state.get("overriding") == number
+        with st.container(horizontal=True, key="decision_buttons"):
+            if st.button("Accept recommendation", key="accept", type="primary", icon=":material/check:"):
+                db.save_prescription(clinician["id"], number, recommended, recommended,
+                                     policy.USUAL_REGIMENS[recommended])
+                st.rerun()
+            if st.button("Override", key="override", icon=":material/edit:", disabled=overriding):
+                st.session_state["overriding"] = number
+                st.rerun()
+        if not overriding:
+            return
+
+        others = [drug for drug in drugs if drug != recommended]
+        drug = st.selectbox("Prescribe instead", others, format_func=policy.drug_label, index=None,
+                            placeholder="Choose an antibiotic", key=f"override_drug_{number}")
+        if drug:
+            st.caption(f"Usual adult regimen: {regimen_text(drug)}.")
+        reason = st.selectbox("Reason for override", db.OVERRIDE_REASONS, index=None,
+                              placeholder="Choose a reason", key=f"override_reason_{number}")
+        notes = st.text_area("Notes", placeholder="Add detail (optional)", key=f"override_notes_{number}")
+        with st.container(horizontal=True, key="override_buttons"):
+            if st.button("Save override", key="override_save", type="primary", icon=":material/check:",
+                         disabled=drug is None or reason is None):
+                db.save_prescription(clinician["id"], number, recommended, drug,
+                                     policy.USUAL_REGIMENS[drug], reason, notes)
+                del st.session_state["overriding"]
+                st.rerun()
+            if st.button("Cancel", key="override_cancel", type="tertiary"):
+                del st.session_state["overriding"]
+                st.rerun()
+
+
+def recommendation_panel(model, features, clinician: dict, record: dict):
+    predictions = data.predict(model, features, data.patient_features(features, record))
+    drugs = list(predictions.index)          # narrowest first
+    risks = list(predictions.to_numpy())     # chance of resistance
 
     with st.container(key="results"):
         target = 90 / 100
 
         picked = policy.recommend(risks, target)
+        precheck_strip(record, drugs[picked])
         st.html(hero_html(policy.drug_label(drugs[picked]), 1 - risks[picked],
                           policy.spectrum(drugs[picked]), risks[picked] <= 1 - target, target,
                           policy.explain(risks, drugs, target)))
+        decision_card(clinician, record, drugs, drugs[picked])
 
         with card("ladder", "stairs", "Every option, narrowest first", "predicted chance of working"):
             st.html(ladder_html(drugs, risks, picked, target))
@@ -244,8 +338,9 @@ LIMITS = [
     ("stethoscope", "Decision support, not a prescription",
      "A clinician makes the choice. The tool shows how likely each option is to work."),
     ("rule", "It only predicts resistance",
-     "It does not check allergies, pregnancy, kidney function, drug interactions, or the site and "
-     "severity of the infection."),
+     "The model does not know about allergies, pregnancy, kidney function or symptoms. The "
+     "pre-checks above the recommendation flag those from the patient record with a few simple "
+     "rules; drug interactions and the site and severity of infection are not checked at all."),
     ("location_city", "7 antibiotics, one health system",
      "Trained on positive urine cultures from one health system, 2008 onwards. Other hospitals "
      "will have different resistance patterns."),
@@ -275,10 +370,10 @@ def assessment_page():
     if record is None:
         patient_list(clinician)
     else:
-        patient_assessment(record)
+        patient_assessment(clinician, record)
 
 
-def patient_assessment(record: dict):
+def patient_assessment(clinician: dict, record: dict):
     if st.button("All patients", key="back", icon=":material/arrow_back:", type="tertiary"):
         del st.session_state["patient"]
         st.rerun()
@@ -302,7 +397,7 @@ def patient_assessment(record: dict):
                     f'</div></div>')
             patient_record(record)
         with result_column:
-            target = recommendation_panel(model, features, data.patient_features(features, record))
+            target = recommendation_panel(model, features, clinician, record)
     with evidence:
         evidence_tab(target)
     with limits:
@@ -324,27 +419,6 @@ def sign_in_page():
                 st.session_state["clinician"] = clinician
                 st.rerun()
             st.error("Incorrect credentials", icon=":material/lock:")
-
-
-# Screens from the roadmap that are not built yet: (title, address, icon, what it will hold).
-PLANNED = [
-    ("Patient Encounters", "patients", "group",
-     "Each patient's wider history in one place: allergies, current medicines, kidney and liver "
-     "function, earlier infections and past culture results."),
-    ("Stewardship Analytics", "analytics", "bar_chart",
-     "Prescribing across the service: broad versus narrow use, recommendations accepted or "
-     "overridden, and resistance trends."),
-]
-
-
-def planned_page(icon: str, title: str, body: str):
-    def page():
-        st.html(f"""<div class="fx-empty">
-          <span class="fx-badge fx-badge-navy">Planned</span>
-          <div class="fx-title">{html.escape(title)}</div>
-          <p>{html.escape(body)}</p>
-        </div>""")
-    return page
 
 
 # ----------------------------------------------------------------------------- frame
@@ -369,13 +443,18 @@ assessment = st.Page(assessment_page, title="Clinical Assessment", url_path="ass
                      icon=":material/clinical_notes:")
 home = st.Page(lambda: dashboard.render(clinician), title="Dashboard", url_path="dashboard",
                icon=":material/dashboard:", default=True)
-planned = [st.Page(planned_page(icon, title, body), title=title, url_path=path,
-                   icon=f":material/{icon}:") for title, path, icon, body in PLANNED]
 cultures = st.Page(lambda: culture_results.render(clinician), title="Culture Results",
                    url_path="cultures", icon=":material/biotech:")
 follow = st.Page(lambda: follow_up.render(clinician), title="Follow-up", url_path="follow-up",
                  icon=":material/event_repeat:")
-current = st.navigation({"Workspace": [home, assessment, cultures, follow], "Coming next": planned})
+stewardship = st.Page(
+    lambda: analytics.render(clinician, {"assessment": assessment, "cultures": cultures,
+                                         "follow": follow}),
+    title="Stewardship Analytics", url_path="analytics", icon=":material/bar_chart:")
+current = st.navigation([home, assessment, cultures, follow, stewardship])
+if current is not assessment:    # the analytics page sets this just before opening the list
+    st.session_state.pop("patient_filter", None)
+    st.session_state.pop("overriding", None)
 if current is not assessment:      # coming back to a screen starts at its list
     st.session_state.pop("patient", None)
 if current is not cultures:
@@ -394,7 +473,7 @@ with st.sidebar:
         st.rerun()
     st.html('<div class="fx-sidenote"><b>Research demo</b>Fabricated patients. '
             'Not for clinical use.</div>')
-top_bar(current.title, sample_data=current in (home, assessment, cultures, follow))
+top_bar(current.title, sample_data=current in (home, assessment, cultures, follow, stewardship))
 
 current.run()
 

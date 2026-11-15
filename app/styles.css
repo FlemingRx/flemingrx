@@ -277,10 +277,6 @@ button[data-variant="pills"][data-selected="true"] * { color: #fff !important; }
 
 .fx-blank { min-height: 15rem; }
 
-.fx-empty { max-width: 560px; margin: 3rem auto; text-align: center; background: #fff;
-  border: 1px dashed #cfd7e4; border-radius: 0; padding: 2.2rem 1.6rem; }
-.fx-empty .fx-title { margin: .6rem 0 .4rem; }
-.fx-empty p { margin: 0; font-size: .9rem; line-height: 1.55; color: var(--fx-muted); }
 
 /* dashboard columns: wrap instead of squeezing on mid-width screens */
 .st-key-dash [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
@@ -410,3 +406,45 @@ button[data-variant="pills"] { border-radius: 0 !important; }
   [data-testid="stHeader"] { display: none !important; }
   .stApp:has([data-testid="stExpandSidebarButton"]) [data-testid="stMainBlockContainer"] { padding-top: 1.1rem; }
 }
+
+/* ---------- analytics ---------- */
+.st-key-an_head { justify-content: space-between; flex-wrap: wrap; gap: .6rem !important; }
+.st-key-cx_controls { gap: .6rem !important; flex-wrap: wrap; }
+.st-key-patient_filter_bar { gap: .6rem !important; }
+.st-key-patient_filter_bar p { font-size: .84rem; color: var(--fx-ink); margin: 0; }
+.fx-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.fx-pair > div { display: flex; flex-direction: column; gap: .1rem; }
+.fx-pair b { font-family: "Plus Jakarta Sans", Inter, sans-serif; font-size: 1.6rem; font-weight: 800; color: var(--fx-navy); line-height: 1.15; }
+.fx-pair span { font-size: .8rem; color: var(--fx-muted); }
+
+/* prescription breakdown: a three-column table of clickable rows */
+.fx-qhead.fx-grid-3, .st-key-an_rx_rows button p { display: grid; align-items: center; column-gap: .9rem;
+  grid-template-columns: minmax(0, 1fr) 7rem 4rem; }
+.fx-qhead.fx-grid-3 span:not(:first-child), .st-key-an_rx_rows button p span { text-align: right; }
+.st-key-an_rx_rows { gap: 0 !important; }
+.st-key-an_rx_rows button { background: #fff; border: 0; border-bottom: 1px solid var(--fx-line); padding: .55rem .9rem; }
+.st-key-an_rx_rows button:hover { background: var(--fx-teal-soft); color: var(--fx-ink); }
+.st-key-an_rx_rows button > div, .st-key-an_rx_rows button > div > span { width: 100%; }
+.st-key-an_rx_rows button > div > span { justify-content: space-between; flex-direction: row-reverse; }
+.st-key-an_rx_rows button [data-testid="stMarkdownContainer"] { flex: 1; min-width: 0; }
+.st-key-an_rx_rows button p { text-align: left; font-size: .86rem; }
+.st-key-an_rx_rows button p strong { color: var(--fx-navy); font-weight: 600; }
+.st-key-an_rx_rows button p span { color: var(--fx-ink) !important; font-variant-numeric: tabular-nums; }
+
+/* ---------- pre-check strip and decision (clinical assessment) ---------- */
+.fx-checks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; background: #fff;
+  border: 1px solid var(--fx-line); }
+@media (max-width: 900px) { .fx-checks { grid-template-columns: repeat(2, 1fr); } }
+.fx-check { display: flex; flex-direction: column; gap: .15rem; padding: .7rem .8rem;
+  border-left: 1px solid var(--fx-line); border-top: 3px solid #c3cad8; min-width: 0; }
+.fx-check:first-child { border-left: 0; }
+.fx-check b { font-size: .88rem; color: var(--fx-ink); overflow-wrap: anywhere; }
+.fx-check i { font-style: normal; font-size: .72rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.fx-check small { font-size: .74rem; line-height: 1.4; color: var(--fx-muted); }
+.fx-check-ok { border-top-color: var(--fx-teal); } .fx-check-ok i { color: #00796d; }
+.fx-check-unknown i { color: var(--fx-muted); }
+.fx-check-caution { border-top-color: var(--fx-amber); } .fx-check-caution i { color: var(--fx-amber); }
+.fx-check-stop { border-top-color: var(--fx-red); background: var(--fx-red-soft); } .fx-check-stop i { color: var(--fx-red); }
+.st-key-decision_buttons, .st-key-override_buttons { gap: .5rem !important; }
+.st-key-accept button, .st-key-override_save button { background: var(--fx-navy); border-color: var(--fx-navy); }
+.st-key-accept button:hover, .st-key-override_save button:hover:not(:disabled) { background: var(--fx-teal); border-color: var(--fx-teal); }

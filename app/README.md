@@ -10,9 +10,11 @@ assigned to them. Screens, from the sidebar:
   and pending cultures. Apart from the clinician's name it shows sample data for now (written
   out at the top of `dashboard.py`).
 - **Clinical Assessment**: opens on the list of the clinician's patients. Selecting one shows
-  their details from the database, each antibiotic's predicted chance of working, and the pick.
-  Its **Evidence** tab has the trade-off chart from `notebooks/04_recommend.py` and its
-  **Limits** tab says what the tool does not do.
+  their details from the database, four pre-checks (symptoms, allergies, kidney function,
+  pregnancy), each antibiotic's predicted chance of working, and the pick. The clinician accepts
+  the recommendation or overrides it with a reason, which is saved as a prescription; if the
+  patient already has one, it is shown instead. Its **Evidence** tab has the trade-off chart from
+  `notebooks/04_recommend.py` and its **Limits** tab says what the tool does not do.
 - **Culture Results**: four counts (pending, ready for review, resistance mismatches, reviewed)
   and the list of the clinician's cultures. Selecting one shows the patient's details, the
   culture, the lab's susceptibility results, how the current prescription compares with them,
@@ -24,8 +26,11 @@ assigned to them. Screens, from the sidebar:
   are in the queue, what has been documented since, a summary with a suggested next step, and a
   form to record the clinician's reassessment. The summary is fixed wording picked by rules from
   what is on record, not written by a model.
-- **Coming next**: Patient Encounters and Stewardship Analytics are placeholders that say what
-  each will hold.
+- **Stewardship Analytics**: totals across the clinician's patients for a chosen reporting
+  period: antibiotics prescribed, how often the model's recommendation was accepted, culture
+  and resistance findings, and follow-up outcomes. Every figure is counted from the database;
+  where something isn't recorded yet the page says so. Buttons open the other screens filtered
+  to the cases behind a figure.
 
 ## How it fits together
 
@@ -35,8 +40,10 @@ assigned to them. Screens, from the sidebar:
 | `dashboard.py` | The dashboard and its sample data. |
 | `culture_results.py` | The culture worklist and the page for one culture. |
 | `follow_up.py` | The follow-up queue and the page for one patient's follow-up. |
+| `analytics.py` | The stewardship analytics page and the counting behind it. |
 | `ui.py` | Building blocks the screens share: cards and the read-only patient record. |
-| `policy.py` | The recommendation rule: the narrowest antibiotic that clears the bar. |
+| `policy.py` | The recommendation rule: the narrowest antibiotic that clears the bar. Also a usual adult regimen for each antibiotic. |
+| `prechecks.py` | The four pre-checks. Simple rules for the demo, not reviewed by a clinician. |
 | `data.py` | Loads the model and tables; turns a patient's database row into model features. |
 | `db.py` | The database: clinicians, patients, who looks after whom, and password checking. |
 | `seed.py` | The fabricated demo clinicians, patients, prescriptions, cultures and follow-ups, loaded into an empty database. |
@@ -54,9 +61,9 @@ Seven tables (defined in `db.py`):
 | Table | What it holds |
 |---|---|
 | `clinicians` | One row per login: username, name, role, and a salted hash of the password. |
-| `patients` | One row per patient: patient number and the details the model uses (age band, sex, care setting, nursing home contact, resistance history, antibiotic exposure, earlier organisms, procedures). |
+| `patients` | One row per patient: patient number and the details the model uses (age band, sex, care setting, nursing home contact, resistance history, antibiotic exposure, earlier organisms, procedures), plus what the pre-checks use (symptoms, allergies, eGFR, pregnancy). |
 | `clinician_patients` | One row per clinician and patient pair, so a patient can have several clinicians. |
-| `prescriptions` | What the model recommended for a patient and what the clinician prescribed: drug, dose, frequency, duration, start date. |
+| `prescriptions` | What the model recommended for a patient and what the clinician prescribed: drug, dose, frequency, duration, start date, whether it was an acceptance or an override, and the override reason. |
 | `cultures` | One row per urine culture: specimen, dates, organism, colony count, and the clinician's review (decision, notes, who, when). |
 | `susceptibilities` | One row per culture and antibiotic tested: susceptible, intermediate or resistant. |
 | `follow_ups` | One row per patient being followed after a prescription: the reason and where it came from, what has been documented since (symptoms, adherence, adverse reactions, notes), the queue status, and the clinician's reassessment. |
@@ -90,9 +97,10 @@ When deploying as a Databricks App:
 Creating the tables, loading the demo data, signing in and reading a clinician's patients have
 been run against Lakebase from a laptop. Running as a deployed Databricks App has not.
 
-The first time the app finds an empty database it creates the tables and loads the fabricated
-clinicians and patients from `seed.py`. The demo sign-in details are in that file. To reload
-after editing it, empty the tables and start the app again.
+Every time the app starts it brings the database up to date: it creates missing tables, adds
+columns the tables have gained, and loads any fabricated clinicians and patients from `seed.py`
+that aren't there yet. It only ever adds; nothing a clinician has recorded is changed. The demo
+sign-in details are in `seed.py`. To start over, empty the tables and start the app again.
 
 Signing in lasts for the browser session: reloading the page signs you out.
 

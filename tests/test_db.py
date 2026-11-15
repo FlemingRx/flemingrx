@@ -4,6 +4,8 @@ import sqlalchemy as sa
 
 import data
 import db
+import policy
+import prechecks
 import seed
 
 FEATURES = ["is_inpatient", "age_min", "gender", "ward_ip", "ward_op", "ward_icu", "adi_score",
@@ -113,6 +115,7 @@ def test_cultures_are_limited_to_the_clinicians_patients(url):
     for person in seed.CLINICIANS:
         clinician = db.sign_in(person["username"], person["password"], url)
         mine = {p["patient_number"] for p in db.patients_for(clinician["id"], url)}
+        mine &= {case[0] for case in seed.CASES}             # the newest patients have no culture yet
         cases = db.cultures_for(clinician["id"], url)
         assert {case["patient_number"] for case in cases} == mine and len(cases) == len(mine)
 
@@ -154,9 +157,9 @@ def test_reviewing_a_culture(url):
 
 def test_seed_cases_use_known_patients_drugs_and_results():
     numbers = {patient["row"]["patient_number"] for patient in seed.PATIENTS}
-    assert {case[0] for case in seed.CASES} == numbers           # one culture per patient
+    assert {case[0] for case in seed.CASES} <= numbers and len(seed.CASES) == 13
     for case in seed.CASES:
-        assert case[2] in seed.REGIMENS and case[3] in seed.REGIMENS
+        assert case[2] in policy.USUAL_REGIMENS and case[3] in policy.USUAL_REGIMENS
         assert case[9] is None or (len(case[9]) == len(seed.PANEL) and set(case[9]) <= set("SIR"))
 
 
@@ -164,6 +167,7 @@ def test_follow_up_queue_is_limited_to_the_clinicians_patients(url):
     for person in seed.CLINICIANS:
         clinician = db.sign_in(person["username"], person["password"], url)
         mine = {p["patient_number"] for p in db.patients_for(clinician["id"], url)}
+        mine &= {row[0] for row in seed.FOLLOW_UPS}          # only patients with a prescription
         rows = db.follow_ups_for(clinician["id"], url)
         assert {row["patient_number"] for row in rows} == mine and len(rows) == len(mine)
         assert all(row["status"] in db.FOLLOW_UP_STATUSES and row["reason"] in db.FOLLOW_UP_REASONS
@@ -206,7 +210,128 @@ def test_saving_a_reassessment_moves_the_follow_up(url):
 
 def test_seed_follow_ups_use_known_patients_and_values():
     numbers = {patient["row"]["patient_number"] for patient in seed.PATIENTS}
-    assert {row[0] for row in seed.FOLLOW_UPS} == numbers          # one follow-up per patient
+    assert {row[0] for row in seed.FOLLOW_UPS} == {case[0] for case in seed.CASES} <= numbers
     for row in seed.FOLLOW_UPS:
         assert row[1] in db.FOLLOW_UP_REASONS and row[5] in db.FOLLOW_UP_STATUSES
         assert row[10] is None or row[10][0] in db.FOLLOW_UP_DECISIONS
+
+
+def test_analytics_counts_come_from_the_database(url):
+    import datetime
+
+    import analytics
+
+    mitchell = db.sign_in("sarahmitchell", password_of("sarahmitchell"), url)
+    rows = (db.prescriptions_for(mitchell["id"], url), db.cultures_for(mitchell["id"], url),
+            db.follow_ups_for(mitchell["id"], url))
+    stats = analytics.summarise(*rows)
+    assert (stats["assessments"], stats["accepted"], stats["changed"]) == (8, 3, 5)
+    assert sorted(stats["changed_patients"]) == ["PT-00377", "PT-00389", "PT-00391", "PT-00408",
+                                                 "PT-00410"]
+    assert stats["by_drug"][0] == ("nitrofurantoin", 3) and sum(n for _, n in stats["by_drug"]) == 8
+    assert sorted(stats["patients_by_drug"]["nitrofurantoin"]) == ["PT-00377", "PT-00399", "PT-00410"]
+    assert (stats["cultures"], stats["resulted"], stats["mismatches"], stats["reviewed"]) == (8, 7, 2, 1)
+    assert dict((a, (r, t)) for a, r, t in stats["resistance"])["ciprofloxacin"] == (3, 7)
+    assert stats["organisms"][0] == ("Escherichia coli", 5)
+    assert (stats["follow_ups"], stats["documented"], stats["adverse"]) == (8, 5, 1)
+    assert dict(stats["outcomes"]) == {"Resolved": 1, "Improving": 1, "Unchanged": 1,
+                                       "Not improving": 1, "Worsening": 1}
+    assert (stats["unresolved"], stats["needs_reassessment"]) == (3, 4)
+
+    # The reporting period drops anything older: only PT-00377's culture was collected yesterday.
+    recent = analytics.summarise(*rows, since=datetime.date.today() - datetime.timedelta(days=1))
+    assert (recent["assessments"], recent["cultures"], recent["resulted"]) == (1, 1, 0)
+    nothing = analytics.summarise(*rows, since=datetime.date.today() + datetime.timedelta(days=1))
+    assert nothing["assessments"] == 0 and analytics.percent(0, 0) == "–"
+
+
+def test_accepting_and_overriding_a_recommendation(url):
+    mitchell = db.sign_in("sarahmitchell", password_of("sarahmitchell"), url)
+    okafor = db.sign_in("jokafor", password_of("jokafor"), url)
+    regimen = policy.USUAL_REGIMENS["cefazolin"]
+    assert db.prescription_for(mitchell["id"], "PT-00424", url) is None
+
+    assert db.save_prescription(okafor["id"], "PT-00424", "cefazolin", "cefazolin", regimen,
+                                url=url) is False                       # not Okafor's patient
+    assert db.save_prescription(mitchell["id"], "PT-00424", "cefazolin", "cefazolin", regimen, url=url)
+    course = db.prescription_for(mitchell["id"], "PT-00424", url)
+    assert (course["decision"], course["drug"], course["dose"], course["duration_days"]) == (
+        "Accepted", "cefazolin", "1 g IV", 7)
+    assert course["override_reason"] is None and course["prescriber"] == "Dr. Sarah Mitchell"
+    assert db.save_prescription(mitchell["id"], "PT-00424", "cefazolin", "cefazolin", regimen,
+                                url=url) is False                       # already has one
+
+    with pytest.raises(ValueError):                                     # an override needs a reason
+        db.save_prescription(mitchell["id"], "PT-00427", "cefazolin", "nitrofurantoin",
+                             policy.USUAL_REGIMENS["nitrofurantoin"], url=url)
+    assert db.save_prescription(mitchell["id"], "PT-00427", "cefazolin", "nitrofurantoin",
+                                policy.USUAL_REGIMENS["nitrofurantoin"], "Clinician preference",
+                                " Oral agent. ", url)
+    course = db.prescription_for(mitchell["id"], "PT-00427", url)
+    assert (course["decision"], course["override_reason"], course["override_notes"]) == (
+        "Overridden", "Clinician preference", "Oral agent.")
+
+
+def test_demo_prescriptions_have_a_decision_and_overrides_a_reason(url):
+    with db.engine(url).connect() as connection:
+        rows = connection.execute(sa.select(db.prescriptions)).mappings().all()
+    assert len(rows) == 13
+    for row in rows:
+        accepted = row["drug"] == row["recommended_drug"]
+        assert row["decision"] == ("Accepted" if accepted else "Overridden")
+        assert (row["override_reason"] is None) == accepted
+        assert accepted or row["override_reason"] in db.OVERRIDE_REASONS
+
+
+def test_an_older_database_gains_the_new_columns_and_patients(tmp_path):
+    """A database made before the pre-check and decision columns existed is brought up to date."""
+    url = f"sqlite:///{tmp_path / 'old.db'}"
+    db.init(url)
+    with db.engine(url).begin() as connection:
+        for table, column in [("patients", "symptoms"), ("patients", "allergies"), ("patients", "egfr"),
+                              ("patients", "pregnancy"), ("prescriptions", "decision"),
+                              ("prescriptions", "override_reason"), ("prescriptions", "override_notes")]:
+            connection.execute(sa.text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+        connection.execute(sa.text("DELETE FROM clinician_patients WHERE patient_id IN "
+                                   "(SELECT id FROM patients WHERE patient_number = 'PT-00433')"))
+        connection.execute(sa.text("DELETE FROM patients WHERE patient_number = 'PT-00433'"))
+    db.engine(url).dispose()
+
+    db.init(url)
+    mitchell = db.sign_in("sarahmitchell", password_of("sarahmitchell"), url)
+    old = db.patient_for(mitchell["id"], "PT-00412", url)
+    assert (old["allergies"], old["egfr"], old["pregnancy"]) == (["sulfonamide"], 52, "Not applicable")
+    assert db.patient_for(mitchell["id"], "PT-00433", url)["egfr"] == 24            # added back
+    assert db.prescription_for(mitchell["id"], "PT-00391", url)["decision"] == "Overridden"
+    assert len(db.patients_for(mitchell["id"], url)) == 12
+
+
+def test_prechecks_flag_what_gets_in_the_way():
+    base = {"symptoms": ["Dysuria"], "allergies": [], "egfr": 90, "pregnancy": "Not pregnant"}
+    levels = lambda record, drug: [c["level"] for c in prechecks.run(record, drug)]   # noqa: E731
+    assert levels(base, "nitrofurantoin") == ["ok", "ok", "ok", "ok"]
+
+    # No symptoms: usually don't treat, unless pregnant.
+    assert prechecks.symptoms({**base, "symptoms": []})["level"] == "stop"
+    assert prechecks.symptoms({**base, "symptoms": [], "pregnancy": "Pregnant"})["level"] == "caution"
+
+    allergic = {**base, "allergies": ["penicillin"]}
+    assert prechecks.allergies(allergic, "piperacillin_tazobactam")["level"] == "stop"
+    assert prechecks.allergies(allergic, "ceftriaxone")["level"] == "caution"       # related drug
+    assert prechecks.allergies(allergic, "nitrofurantoin")["level"] == "ok"
+
+    assert prechecks.kidney({**base, "egfr": 24}, "nitrofurantoin")["level"] == "stop"
+    assert prechecks.kidney({**base, "egfr": 24}, "ceftriaxone")["level"] == "caution"
+    assert prechecks.kidney({**base, "egfr": 45}, "ceftriaxone")["level"] == "caution"
+    assert prechecks.kidney({**base, "egfr": None}, "ceftriaxone")["level"] == "unknown"
+
+    pregnant = {**base, "pregnancy": "Pregnant"}
+    assert prechecks.pregnancy(pregnant, "ciprofloxacin")["level"] == "stop"
+    assert prechecks.pregnancy(pregnant, "cefazolin")["level"] == "caution"
+    assert prechecks.pregnancy({**base, "pregnancy": None}, "cefazolin")["level"] == "unknown"
+
+    assert prechecks.worst(prechecks.run(pregnant, "ciprofloxacin")) == "stop"
+    assert set(prechecks.DRUG_GROUP) == set(policy.DRUG_LABELS) == set(policy.USUAL_REGIMENS)
+    for patient in seed.PATIENTS:                       # the demo data only uses known values
+        assert set(patient["row"]["allergies"]) <= set(prechecks.ALLERGY_LABELS)
+        assert patient["row"]["pregnancy"] in ("Pregnant", "Not pregnant", "Not applicable")

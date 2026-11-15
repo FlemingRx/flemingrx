@@ -17,6 +17,10 @@ from ui import card, patient_record, record_card
 # Worklist order, and the colour each status is written in (list rows use Streamlit's colour names).
 STATUSES = {"Resistance mismatch": "red", "Ready for review": "orange", "Pending": "gray",
             "Reviewed": "green"}
+# The list's filter buttons: label -> the statuses it shows. A mismatch is also ready for review.
+FILTERS = {"All": tuple(STATUSES), "Pending": ("Pending",),
+           "Ready for review": ("Ready for review", "Resistance mismatch"),
+           "Resistance mismatch": ("Resistance mismatch",), "Reviewed": ("Reviewed",)}
 RESULT_CLASS = {"Susceptible": "ok", "Intermediate": "warn", "Resistant": "bad"}
 DECISION_HELP = {
     "Compatible": "Current prescription appears appropriate based on susceptibility.",
@@ -61,12 +65,16 @@ def case_list(clinician: dict):
     if not cases:
         st.info("There are no cultures for your patients yet.", icon=":material/info:")
         return
-    search = st.text_input("Search culture or patient ID", icon=":material/search:",
-                           placeholder="Search culture or patient ID...",
-                           label_visibility="collapsed", key="culture_search", width=280)
+    with st.container(horizontal=True, vertical_alignment="bottom", key="cx_controls"):
+        search = st.text_input("Search culture or patient ID", icon=":material/search:",
+                               placeholder="Search culture or patient ID...",
+                               label_visibility="collapsed", key="culture_search", width=280)
+        chosen = st.segmented_control("Status", list(FILTERS), default="All", required=True,
+                                      label_visibility="collapsed", key="cx_filter")
     wanted = search.strip().lower()
-    shown = [case for case in cases if wanted in case["culture_number"].lower()
-             or wanted in case["patient_number"].lower()]
+    shown = [case for case in cases
+             if status[case["culture_number"]] in FILTERS[chosen or "All"]
+             and (wanted in case["culture_number"].lower() or wanted in case["patient_number"].lower())]
     if not shown:
         st.caption("No cultures match.")
     order = list(STATUSES)

@@ -18,8 +18,17 @@ from ui import card, patient_record, record_card
 
 # Queue order, and the colour each status is written in.
 STATUS_TONE = {"Needs reassessment": "red", "Awaiting follow-up": "blue", "Resolved": "green"}
-FILTERS = {"All": None, "Needs Reassessment": "Needs reassessment", "Awaiting": "Awaiting follow-up",
-           "Resolved": "Resolved"}
+UNRESOLVED_SYMPTOMS = ("Unchanged", "Not improving", "Worsening")
+# The queue's filter buttons: label -> does this row belong? The last two are also what the
+# analytics page opens the queue with.
+FILTERS = {
+    "All": lambda row: True,
+    "Needs Reassessment": lambda row: row["status"] == "Needs reassessment",
+    "Awaiting": lambda row: row["status"] == "Awaiting follow-up",
+    "Resolved": lambda row: row["status"] == "Resolved",
+    "Adverse reaction": lambda row: bool(row["adverse_reaction"]),
+    "Unresolved symptoms": lambda row: row["symptom_progression"] in UNRESOLVED_SYMPTOMS,
+}
 NOT_YET = "Not yet documented"
 
 NEXT_STEP = {
@@ -83,9 +92,9 @@ def queue(clinician: dict):
                                 key="fu_search", width=280)
         chosen = st.segmented_control("Status", list(FILTERS), default="All", required=True,
                                         label_visibility="collapsed", key="fu_filter")
-    wanted = FILTERS[chosen]
+    wanted = FILTERS[chosen or "All"]
     shown = [row for row in rows
-                if (wanted is None or row["status"] == wanted)
+                if wanted(row)
                 and search.strip().lower() in row["patient_number"].lower()]
     order = list(STATUS_TONE)
     shown.sort(key=lambda row: order.index(row["status"]))      # stable: newest first within each
