@@ -214,6 +214,23 @@ def fill_new_columns(connection) -> None:
             decision="Accepted" if accepted else "Overridden", override_reason=reason,
             override_notes=notes))
 
+    # Prescriptions from before assessments were logged: give each a log row saying what was
+    # recommended and decided. What the model predicted at the time was never stored, so
+    # `chances`, `cleared_bar` and `prechecks` stay empty for these.
+    unlogged = connection.execute(
+        db.sa.select(db.prescriptions).where(db.prescriptions.c.assessment_id.is_(None))
+    ).mappings().all()
+    for course in unlogged:
+        when = min(datetime.datetime.combine(course["started_on"], datetime.time(9, 0)),
+                   datetime.datetime.now())
+        result = connection.execute(db.assessments.insert().values(
+            patient_id=course["patient_id"], clinician_id=course["prescribed_by"], assessed_at=when,
+            target=0.9, recommended_drug=course["recommended_drug"], outcome=course["decision"],
+            outcome_reason=course["override_reason"], outcome_notes=course["override_notes"],
+            decided_at=when))
+        connection.execute(db.prescriptions.update().where(db.prescriptions.c.id == course["id"])
+                           .values(assessment_id=result.inserted_primary_key[0]))
+
 
 def load_cultures(connection) -> None:
     """Insert a prescription and a culture (with its panel results) for each patient in CASES.

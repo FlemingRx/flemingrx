@@ -54,10 +54,11 @@ def _icon(name: str) -> str:
     return f'<span class="fx-msym">{name}</span>'
 
 
-def _card(icon: str, tone: str, title: str, count, rows: str) -> str:
+def _card(icon: str, tone: str, title: str, count, rows: str, fixed: bool = False) -> str:
     badge = f'<span class="fx-count fx-count-{tone}">{count}</span>' if count is not None else ""
+    cls = "fx-dcard fx-dcard-fixed" if fixed else "fx-dcard"
     return f"""
-    <div class="fx-dcard">
+    <div class="{cls}">
       <div class="fx-dhead">
         <span class="fx-dicon fx-dicon-{tone}">{_icon(icon)}</span>
         <span class="fx-dtitle">{html.escape(title)}</span>{badge}
@@ -107,18 +108,20 @@ def _snapshot_html() -> str:
 def render(clinician: dict):
     """Draw the dashboard for the signed-in clinician (only the welcome card uses them so far)."""
     with st.container(key="dash"):
-        left, middle, right = st.columns([5, 6, 6], gap="small")
+        left, right = st.columns([5, 7], gap="small")
 
     with left:
-        st.html(_welcome_html(clinician) + _overview_html() + _snapshot_html())
-
-    with middle:
-        st.html(_card("warning", "red", "Requires attention", len(ATTENTION), "".join(
-            _row(case, what, _status(level, LEVEL_CLASS[level])) for case, what, level in ATTENTION)))
-        # st.html('<div class="fx-dcard fx-blank"></div>')
+        st.html(_welcome_html(clinician) + _overview_html())
 
     with right:
-        st.html(_card("monitor_heart", "navy", "Recent activity", len(ACTIVITY), "".join(
-            _row(case, what, f'<span class="fx-when">{when}</span>') for case, what, when in ACTIVITY)))
-        st.html(_card("science", "violet", "Pending cultures", len(CULTURES), "".join(
-            _row(culture, what, _status(status, STATUS_CLASS[status])) for culture, what, status in CULTURES)))
+        with st.container(key="dash_cards"):
+            attention, cultures = st.columns(2, gap="small")
+        with attention:
+            st.html(_card("warning", "red", "Requires attention", len(ATTENTION), "".join(
+                _row(case, what, _status(level, LEVEL_CLASS[level])) for case, what, level in ATTENTION),
+                fixed=True))
+        with cultures:
+            st.html(_card("science", "violet", "Pending cultures", len(CULTURES), "".join(
+                _row(culture, what, _status(status, STATUS_CLASS[status])) for culture, what, status in CULTURES),
+                fixed=True))
+        st.html(_snapshot_html())

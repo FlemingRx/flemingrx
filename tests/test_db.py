@@ -223,9 +223,12 @@ def test_analytics_counts_come_from_the_database(url):
 
     mitchell = db.sign_in("sarahmitchell", password_of("sarahmitchell"), url)
     rows = (db.prescriptions_for(mitchell["id"], url), db.cultures_for(mitchell["id"], url),
-            db.follow_ups_for(mitchell["id"], url))
+            db.follow_ups_for(mitchell["id"], url), db.assessments_for(mitchell["id"], url))
     stats = analytics.summarise(*rows)
     assert (stats["assessments"], stats["accepted"], stats["changed"]) == (8, 3, 5)
+    assert dict(stats["decisions"]) == {"Accepted": 3, "Overridden": 5, "No antibiotic": 0,
+                                        "No decision yet": 0}
+    assert (stats["decided"], stats["with_chances"], stats["none_cleared"]) == (8, 0, 0)
     assert sorted(stats["changed_patients"]) == ["PT-00377", "PT-00389", "PT-00391", "PT-00408",
                                                  "PT-00410"]
     assert stats["by_drug"][0] == ("nitrofurantoin", 3) and sum(n for _, n in stats["by_drug"]) == 8
@@ -335,3 +338,68 @@ def test_prechecks_flag_what_gets_in_the_way():
     for patient in seed.PATIENTS:                       # the demo data only uses known values
         assert set(patient["row"]["allergies"]) <= set(prechecks.ALLERGY_LABELS)
         assert patient["row"]["pregnancy"] in ("Pregnant", "Not pregnant", "Not applicable")
+
+
+def test_assessments_are_logged_once_and_closed_by_the_decision(url):
+    import analytics
+
+    mitchell = db.sign_in("sarahmitchell", password_of("sarahmitchell"), url)
+    okafor = db.sign_in("jokafor", password_of("jokafor"), url)
+    chances = {"nitrofurantoin": 0.81234567, "cefazolin": 0.93, "meropenem": 0.99}
+    checks = {"Symptoms": "ok", "Allergies": "ok", "Kidney function": "ok", "Pregnancy": "ok"}
+    log = lambda who, patient, drug, cleared=True: db.log_assessment(     # noqa: E731
+        who["id"], patient, drug, 0.9, chances, cleared, checks, "test model", url)
+
+    assert log(okafor, "PT-00424", "cefazolin") is None          # not Okafor's patient
+    assert log(mitchell, "PT-00391", "cefazolin") is None        # already has a prescription
+    first = log(mitchell, "PT-00424", "cefazolin")
+    assert first and log(mitchell, "PT-00424", "cefazolin") == first      # same again: not a new row
+    assert log(mitchell, "PT-00424", "meropenem", cleared=False) != first  # a different recommendation
+
+    logged = db.assessment_for(mitchell["id"], "PT-00424", url)
+    assert (logged["recommended_drug"], logged["cleared_bar"], logged["outcome"]) == (
+        "meropenem", False, None)
+    assert logged["chances"]["nitrofurantoin"] == 0.8123 and logged["prechecks"] == checks
+    assert logged["model_source"] == "test model" and logged["clinician"] == "Dr. Sarah Mitchell"
+
+    # Accepting closes the logged assessment and ties the prescription to it.
+    assert db.save_prescription(mitchell["id"], "PT-00424", "meropenem", "meropenem",
+                                policy.USUAL_REGIMENS["meropenem"], url=url)
+    logged = db.assessment_for(mitchell["id"], "PT-00424", url)
+    assert logged["outcome"] == "Accepted" and logged["decided_at"] is not None
+    assert db.prescription_for(mitchell["id"], "PT-00424", url)["assessment_id"] == logged["id"]
+
+    # Deciding not to treat is recorded on the log, and needs a reason.
+    assert db.record_no_antibiotic(mitchell["id"], "PT-00427", db.NO_ANTIBIOTIC_REASONS[0],
+                                   url=url) is False                 # nothing logged yet
+    log(mitchell, "PT-00427", "ceftriaxone")
+    with pytest.raises(ValueError):
+        db.record_no_antibiotic(mitchell["id"], "PT-00427", "Because", url=url)
+    assert db.record_no_antibiotic(mitchell["id"], "PT-00427", db.NO_ANTIBIOTIC_REASONS[0],
+                                   " Screening culture. ", url)
+    logged = db.assessment_for(mitchell["id"], "PT-00427", url)
+    assert (logged["outcome"], logged["outcome_notes"]) == ("No antibiotic", "Screening culture.")
+    assert db.record_no_antibiotic(mitchell["id"], "PT-00391", db.NO_ANTIBIOTIC_REASONS[0],
+                                   url=url) is False                 # has a prescription
+
+    log(mitchell, "PT-00430", "ciprofloxacin")                       # left undecided
+    stats = analytics.summarise(db.prescriptions_for(mitchell["id"], url), [], [],
+                                db.assessments_for(mitchell["id"], url))
+    assert stats["assessments"] == 12                 # 8 from before logging + the 4 rows above
+    assert dict(stats["decisions"]) == {"Accepted": 4, "Overridden": 5, "No antibiotic": 1,
+                                        "No decision yet": 2}
+    assert (stats["with_chances"], stats["none_cleared"]) == (4, 1)
+    assert stats["untreated_patients"] == ["PT-00427"]
+    assert stats["no_antibiotic_reasons"] == [(db.NO_ANTIBIOTIC_REASONS[0], 1)]
+
+
+def test_every_demo_prescription_has_a_log_row(url):
+    db.init(url)                                      # running it again must not add more
+    with db.engine(url).connect() as connection:
+        courses = connection.execute(sa.select(db.prescriptions)).mappings().all()
+        logged = {row["id"]: row for row in connection.execute(sa.select(db.assessments)).mappings()}
+    assert len(logged) == len(courses) == 13
+    for course in courses:
+        row = logged[course["assessment_id"]]
+        assert (row["outcome"], row["recommended_drug"]) == (course["decision"], course["recommended_drug"])
+        assert row["chances"] is None and row["cleared_bar"] is None      # never stored at the time

@@ -1,6 +1,7 @@
 """Stewardship analytics: totals across the signed-in clinician's patients.
 
-Every figure is counted from rows in the database (prescriptions, cultures, follow-ups) for the
+Every figure is counted from rows in the database (the assessment log, prescriptions, cultures,
+follow-ups) for the
 chosen reporting period; `summarise` does the counting and nothing is estimated. Where the
 database does not record something a stewardship report would want, the page says so instead of
 showing a number (see NOT_LOGGED).
@@ -29,12 +30,10 @@ UNRESOLVED = ("Unchanged", "Not improving", "Worsening")
 
 # What a stewardship report would want that the database has no column for yet.
 NOT_LOGGED = {
-    "decisions": "Not logged yet: cases where no antibiotic cleared the bar, and changes to dose "
-                 "or duration alone. A decision is either an acceptance or an override to a "
-                 "different antibiotic.",
-    "assessments": "Each prescription on record counts as one completed assessment. Opening the "
-                   "Clinical Assessment screen is not logged, so assessments that did not end in "
-                   "a prescription are not counted.",
+    "decisions": "Not logged: changes to dose or duration alone, because the app records a usual "
+                 "regimen and doesn't let it be edited yet.",
+    "chances": "Assessments made before logging was switched on have a recommendation and a "
+               "decision but not the model's predicted chances, so they can't be counted here.",
 }
 
 
@@ -42,9 +41,11 @@ def percent(part: int, whole: int) -> str:
     return f"{round(100 * part / whole)}%" if whole else "–"
 
 
-def summarise(prescriptions: list, cases: list, follow_ups: list, since=None) -> dict:
+def summarise(prescriptions: list, cases: list, follow_ups: list, assessments: list,
+              since=None) -> dict:
     """The page's figures, counted from the rows given. `since` (a date) drops anything earlier."""
     if since:
+        assessments = [row for row in assessments if row["assessed_at"].date() >= since]
         prescriptions = [row for row in prescriptions if row["started_on"] >= since]
         cases = [case for case in cases if case["collected_on"] >= since]
         follow_ups = [row for row in follow_ups if row["reported_on"] >= since]
@@ -62,8 +63,21 @@ def summarise(prescriptions: list, cases: list, follow_ups: list, since=None) ->
     documented = [row for row in follow_ups if row["symptom_progression"]]
     outcomes = collections.Counter(row["symptom_progression"] for row in documented)
 
+    decided = collections.Counter(row["outcome"] or "No decision yet" for row in assessments)
+    untreated = [row for row in assessments if row["outcome"] == "No antibiotic"]
+    with_chances = [row for row in assessments if row["cleared_bar"] is not None]
+
     return {
-        "assessments": len(prescriptions),
+        "assessments": len(assessments),
+        "decisions": [(name, decided[name]) for name in (*db.ASSESSMENT_OUTCOMES, "No decision yet")],
+        "decided": len(assessments) - decided["No decision yet"],
+        "no_antibiotic_reasons": collections.Counter(
+            row["outcome_reason"] or "Not recorded" for row in untreated).most_common(),
+        "undecided_patients": [row["patient_number"] for row in assessments if not row["outcome"]],
+        "untreated_patients": [row["patient_number"] for row in untreated],
+        "with_chances": len(with_chances),
+        "none_cleared": sum(1 for row in with_chances if not row["cleared_bar"]),
+        "prescriptions": len(prescriptions),
         "accepted": len(prescriptions) - len(changed),
         "changed": len(changed),
         "changed_patients": [row["patient_number"] for row in changed],
@@ -102,11 +116,11 @@ def render(clinician: dict, pages: dict):
     days = PERIODS[period]
     since = datetime.date.today() - datetime.timedelta(days=days) if days else None
     stats = summarise(db.prescriptions_for(clinician["id"]), db.cultures_for(clinician["id"]),
-                      db.follow_ups_for(clinician["id"]), since)
+                      db.follow_ups_for(clinician["id"]), db.assessments_for(clinician["id"]), since)
 
-    tiles = [("Total Assessments", "Completed assessments", stats["assessments"], "navy"),
-             ("Recommendation Acceptance", "Accepted without modification",
-              percent(stats["accepted"], stats["assessments"]), "teal"),
+    tiles = [("Total Assessments", "Recommendations produced", stats["assessments"], "navy"),
+             ("Recommendation Acceptance", "Accepted, among assessments with a decision",
+              percent(stats["accepted"], stats["decided"]), "teal"),
              ("Resistance Mismatch", "Among completed culture results",
               percent(stats["mismatches"], stats["resulted"]), "red"),
              ("Follow-up Completion", "Cases with documented follow-up",
@@ -157,7 +171,7 @@ def utilization(stats: dict, pages: dict):
         with st.container(key="an_rx_rows"):
             for drug, count in stats["by_drug"]:
                 name = policy.drug_label(drug)
-                if st.button(f"**{name}** :gray[{count}] :gray[{percent(count, stats['assessments'])}]",
+                if st.button(f"**{name}** :gray[{count}] :gray[{percent(count, stats['prescriptions'])}]",
                              key=f"an_rx_{drug}", icon=":material/chevron_right:", width="stretch",
                              help="Open these patients in Clinical Assessment"):
                     open_patients(pages, f"Prescribed {name}", stats["patients_by_drug"][drug])
@@ -167,26 +181,41 @@ def recommendation_decisions(stats: dict, pages: dict):
     with card("an_decisions", "rule", "Recommendation decisions",
               "clinician decisions following model recommendations"):
         total = stats["assessments"]
-        st.html(
-            f'<div class="fx-kv"><span>Accepted without change</span>'
-            f'<b>{stats["accepted"]} · {percent(stats["accepted"], total)}</b></div>'
-            f'<div class="fx-kv"><span>Different antibiotic prescribed</span>'
-            f'<b>{stats["changed"]} · {percent(stats["changed"], total)}</b></div>')
+        labels = {"Accepted": "Accepted without change", "Overridden": "Overridden: different antibiotic",
+                  "No antibiotic": "Rejected: no antibiotic prescribed"}
+        st.html("".join(
+            f'<div class="fx-kv"><span>{labels.get(name, name)}</span>'
+            f'<b>{count} · {percent(count, total)}</b></div>' for name, count in stats["decisions"]))
+
         if stats["changes"]:
-            rows = "".join(
+            st.html('<div class="fx-section">What was changed (recommended → prescribed)</div>' + "".join(
                 f'<div class="fx-kv"><span>{policy.drug_label(recommended)} → '
                 f'{policy.drug_label(prescribed)}</span><b>{count}</b></div>'
-                for (recommended, prescribed), count in stats["changes"].most_common())
-            st.html('<div class="fx-section">What was changed (recommended → prescribed)</div>' + rows)
+                for (recommended, prescribed), count in stats["changes"].most_common()))
             st.html('<div class="fx-section">Reasons for override</div>' + "".join(
                 f'<div class="fx-kv"><span>{reason}</span><b>{count}</b></div>'
                 for reason, count in stats["reasons"]))
-            if st.button("Open changed recommendations in Clinical Assessment", key="an_open_changed",
-                         icon=":material/arrow_forward:"):
+        if stats["no_antibiotic_reasons"]:
+            st.html('<div class="fx-section">Reasons for not prescribing</div>' + "".join(
+                f'<div class="fx-kv"><span>{reason}</span><b>{count}</b></div>'
+                for reason, count in stats["no_antibiotic_reasons"]))
+        st.html('<div class="fx-section">When the model had no good option</div>'
+                f'<div class="fx-kv"><span>No antibiotic reached the 90% bar (broadest offered)</span>'
+                f'<b>{stats["none_cleared"]} of {stats["with_chances"]}</b></div>')
+
+        with st.container(horizontal=True, key="an_decision_links"):
+            if stats["changed"] and st.button("Open overridden", key="an_open_changed",
+                                              icon=":material/arrow_forward:"):
                 open_patients(pages, "Clinician prescribed a different antibiotic than recommended",
                               stats["changed_patients"])
-        st.caption(NOT_LOGGED["decisions"])
-        st.caption(NOT_LOGGED["assessments"])
+            if stats["untreated_patients"] and st.button("Open not treated", key="an_open_untreated",
+                                                         icon=":material/arrow_forward:"):
+                open_patients(pages, "Clinician decided not to prescribe", stats["untreated_patients"])
+            if stats["undecided_patients"] and st.button("Open awaiting decision", key="an_open_undecided",
+                                                         icon=":material/arrow_forward:"):
+                open_patients(pages, "Assessed, no decision yet", stats["undecided_patients"])
+        # st.caption(NOT_LOGGED["chances"])
+        # st.caption(NOT_LOGGED["decisions"])
 
 
 def culture_and_resistance(stats: dict, pages: dict):
@@ -223,7 +252,7 @@ def culture_and_resistance(stats: dict, pages: dict):
                 f'{percent(stats["reviewed"], resulted)}</b></div>'
                 f'<div class="fx-kv"><span>Awaiting review</span><b>{resulted - stats["reviewed"]} · '
                 f'{percent(resulted - stats["reviewed"], resulted)}</b></div>')
-        st.caption("Fabricated demo data; resistance rates are not clinical reference values.")
+        # st.caption("Fabricated demo data; resistance rates are not clinical reference values.")
 
 
 def follow_up_outcomes(stats: dict, pages: dict):

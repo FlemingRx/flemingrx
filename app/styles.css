@@ -278,9 +278,17 @@ button[data-variant="pills"][data-selected="true"] * { color: #fff !important; }
 .fx-blank { min-height: 15rem; }
 
 
-/* dashboard columns: wrap instead of squeezing on mid-width screens */
-.st-key-dash [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
-.st-key-dash [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { min-width: 290px; }
+/* dashboard columns: three across on wide screens; below 1000px they stack in source order
+   (welcome, requires attention, pending cultures) so pending cultures always sits directly under requires attention */
+.st-key-dash [data-testid="stHorizontalBlock"] { flex-wrap: nowrap; }
+.st-key-dash [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { min-width: 0; }
+@media (max-width: 1000px) {
+  .st-key-dash [data-testid="stHorizontalBlock"] { flex-direction: column; }
+  .st-key-dash [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { width: 100% !important; flex: 0 0 auto !important; }
+}
+/* requires attention and pending cultures share one fixed height; their rows scroll inside the card */
+.fx-dcard-fixed { height: 26rem; display: flex; flex-direction: column; }
+.fx-dcard-fixed .fx-drows { flex: 1; min-height: 0; overflow-y: auto; padding-right: .25rem; }
 .stApp:has([data-testid="stExpandSidebarButton"]) [data-testid="stMainBlockContainer"] { padding-top: 3.4rem; }
 .st-key-dash [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] > [data-testid="stVerticalBlock"] { gap: .5rem; }
 button[data-variant="pills"] { border-radius: 0 !important; }
@@ -448,3 +456,4 @@ button[data-variant="pills"] { border-radius: 0 !important; }
 .st-key-decision_buttons, .st-key-override_buttons { gap: .5rem !important; }
 .st-key-accept button, .st-key-override_save button { background: var(--fx-navy); border-color: var(--fx-navy); }
 .st-key-accept button:hover, .st-key-override_save button:hover:not(:disabled) { background: var(--fx-teal); border-color: var(--fx-teal); }
+.st-key-an_decision_links, .st-key-an_follow_links { gap: .5rem !important; flex-wrap: wrap; }

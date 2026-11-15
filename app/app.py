@@ -226,38 +226,82 @@ def decision_card(clinician: dict, record: dict, drugs: list, recommended: str):
                         for label, value in rows))
             return
 
+        logged = db.assessment_for(clinician["id"], number)
+        if logged and logged["outcome"] == "No antibiotic":
+            reason = logged["outcome_reason"] + (f": {logged['outcome_notes']}"
+                                                 if logged["outcome_notes"] else "")
+            st.html('<div class="fx-verdict fx-verdict-note"><b>Decision recorded: no antibiotic</b>'
+                    f'<span>{html.escape(reason)} · {html.escape(logged["clinician"])} · '
+                    f'{logged["decided_at"].strftime("%b %-d, %Y")}. You can still prescribe below '
+                    f'if that changes.</span></div>')
+
         st.caption(f"Accepting records {policy.drug_label(recommended)}, {regimen_text(recommended)}. "
                    f"It is a usual adult regimen; adjust it for this patient as needed.")
-        overriding = st.session_state.get("overriding") == number
+        # Which of the two forms is open for this patient, if either: "override" or "none".
+        patient, form = st.session_state.get("deciding", (None, None))
+        form = form if patient == number else None
         with st.container(horizontal=True, key="decision_buttons"):
             if st.button("Accept recommendation", key="accept", type="primary", icon=":material/check:"):
                 db.save_prescription(clinician["id"], number, recommended, recommended,
                                      policy.USUAL_REGIMENS[recommended])
+                st.session_state.pop("deciding", None)
                 st.rerun()
-            if st.button("Override", key="override", icon=":material/edit:", disabled=overriding):
-                st.session_state["overriding"] = number
+            if st.button("Override", key="override", icon=":material/edit:", disabled=form == "override"):
+                st.session_state["deciding"] = (number, "override")
                 st.rerun()
-        if not overriding:
+            if st.button("Do not treat", key="no_treat", icon=":material/block:", disabled=form == "none"):
+                st.session_state["deciding"] = (number, "none")
+                st.rerun()
+
+        if form == "override":
+            others = [drug for drug in drugs if drug != recommended]
+            drug = st.selectbox("Prescribe instead", others, format_func=policy.drug_label, index=None,
+                                placeholder="Choose an antibiotic", key=f"override_drug_{number}")
+            if drug:
+                st.caption(f"Usual adult regimen: {regimen_text(drug)}.")
+            reason = st.selectbox("Reason for override", db.OVERRIDE_REASONS, index=None,
+                                  placeholder="Choose a reason", key=f"override_reason_{number}")
+            notes = st.text_area("Notes", placeholder="Add detail (optional)",
+                                 key=f"override_notes_{number}")
+            ready = drug is not None and reason is not None
+        elif form == "none":
+            reason = st.selectbox("Reason for not prescribing", db.NO_ANTIBIOTIC_REASONS, index=None,
+                                  placeholder="Choose a reason", key=f"none_reason_{number}")
+            notes = st.text_area("Notes", placeholder="Add detail (optional)", key=f"none_notes_{number}")
+            ready = reason is not None
+        else:
             return
 
-        others = [drug for drug in drugs if drug != recommended]
-        drug = st.selectbox("Prescribe instead", others, format_func=policy.drug_label, index=None,
-                            placeholder="Choose an antibiotic", key=f"override_drug_{number}")
-        if drug:
-            st.caption(f"Usual adult regimen: {regimen_text(drug)}.")
-        reason = st.selectbox("Reason for override", db.OVERRIDE_REASONS, index=None,
-                              placeholder="Choose a reason", key=f"override_reason_{number}")
-        notes = st.text_area("Notes", placeholder="Add detail (optional)", key=f"override_notes_{number}")
         with st.container(horizontal=True, key="override_buttons"):
-            if st.button("Save override", key="override_save", type="primary", icon=":material/check:",
-                         disabled=drug is None or reason is None):
-                db.save_prescription(clinician["id"], number, recommended, drug,
-                                     policy.USUAL_REGIMENS[drug], reason, notes)
-                del st.session_state["overriding"]
+            if st.button("Save override" if form == "override" else "Save decision", key="override_save",
+                         type="primary", icon=":material/check:", disabled=not ready):
+                if form == "override":
+                    db.save_prescription(clinician["id"], number, recommended, drug,
+                                         policy.USUAL_REGIMENS[drug], reason, notes)
+                else:
+                    db.record_no_antibiotic(clinician["id"], number, reason, notes)
+                del st.session_state["deciding"]
                 st.rerun()
             if st.button("Cancel", key="override_cancel", type="tertiary"):
-                del st.session_state["overriding"]
+                del st.session_state["deciding"]
                 st.rerun()
+
+
+def log_assessment(clinician: dict, record: dict, drugs: list, risks: list, picked: int,
+                   target: float):
+    """Write this recommendation to the assessment log, once per patient per visit to the page.
+
+    db.log_assessment itself skips patients who already have a prescription and repeats of the
+    same recommendation; the check here only saves asking the database on every redraw.
+    """
+    key = (record["patient_number"], drugs[picked])
+    if st.session_state.get("logged") == key:
+        return
+    checks = {check["name"]: check["level"] for check in prechecks.run(record, drugs[picked])}
+    db.log_assessment(clinician["id"], record["patient_number"], drugs[picked], target,
+                      {drug: 1 - risk for drug, risk in zip(drugs, risks)},
+                      risks[picked] <= 1 - target, checks, data.model_source())
+    st.session_state["logged"] = key
 
 
 def recommendation_panel(model, features, clinician: dict, record: dict):
@@ -269,6 +313,7 @@ def recommendation_panel(model, features, clinician: dict, record: dict):
         target = 90 / 100
 
         picked = policy.recommend(risks, target)
+        log_assessment(clinician, record, drugs, risks, picked, target)
         precheck_strip(record, drugs[picked])
         st.html(hero_html(policy.drug_label(drugs[picked]), 1 - risks[picked],
                           policy.spectrum(drugs[picked]), risks[picked] <= 1 - target, target,
@@ -454,7 +499,8 @@ stewardship = st.Page(
 current = st.navigation([home, assessment, cultures, follow, stewardship])
 if current is not assessment:    # the analytics page sets this just before opening the list
     st.session_state.pop("patient_filter", None)
-    st.session_state.pop("overriding", None)
+    st.session_state.pop("deciding", None)
+    st.session_state.pop("logged", None)
 if current is not assessment:      # coming back to a screen starts at its list
     st.session_state.pop("patient", None)
 if current is not cultures:

@@ -8,6 +8,8 @@ The tables:
                       whether that was an acceptance or an override (with the reason)
   cultures            one row per urine culture: what grew, and the clinician's review of the result
   susceptibilities    one row per culture and antibiotic tested: susceptible, intermediate or resistant
+  assessments         the log: one row each time a recommendation is produced for a patient, with
+                      what the model predicted, what the pre-checks found, and what was decided
   follow_ups          one row per patient being followed after a prescription: why, what has been
                       documented since, and the clinician's reassessment
 
@@ -89,6 +91,29 @@ prescriptions = sa.Table(
     sa.Column("decision", sa.String(16)),                          # one of PRESCRIPTION_DECISIONS
     sa.Column("override_reason", sa.String(64)),                   # one of OVERRIDE_REASONS
     sa.Column("override_notes", sa.Text),
+    sa.Column("assessment_id", sa.Integer),      # the logged assessment this decision came from
+)
+
+# The log of assessments. A row is written when a clinician opens a patient who has no prescription
+# and the model produces a recommendation. It keeps what was shown at that moment, because the
+# patient's record and the model can both change later. `outcome` is filled in when the clinician
+# decides; it stays empty while no decision has been made.
+assessments = sa.Table(
+    "assessments", metadata,
+    sa.Column("id", sa.Integer, primary_key=True),
+    sa.Column("patient_id", sa.ForeignKey("patients.id", ondelete="CASCADE"), nullable=False),
+    sa.Column("clinician_id", sa.ForeignKey("clinicians.id"), nullable=False),
+    sa.Column("assessed_at", sa.DateTime, nullable=False),
+    sa.Column("model_source", sa.String(255)),                     # which model produced it
+    sa.Column("target", sa.Float),                                 # the bar, e.g. 0.9
+    sa.Column("recommended_drug", sa.String(64), nullable=False),
+    sa.Column("cleared_bar", sa.Boolean),          # False = nothing reached the bar, broadest offered
+    sa.Column("chances", sa.JSON),                 # {drug: predicted chance of working}
+    sa.Column("prechecks", sa.JSON),               # {check name: level}, see prechecks.py
+    sa.Column("outcome", sa.String(16)),                           # one of ASSESSMENT_OUTCOMES
+    sa.Column("outcome_reason", sa.String(64)),
+    sa.Column("outcome_notes", sa.Text),
+    sa.Column("decided_at", sa.DateTime),
 )
 
 # A culture is "pending" until the lab reports (resulted_on, organism and colony count are empty
@@ -147,6 +172,9 @@ follow_ups = sa.Table(
 
 RESULTS = ("Susceptible", "Intermediate", "Resistant")
 PRESCRIPTION_DECISIONS = ("Accepted", "Overridden")
+ASSESSMENT_OUTCOMES = ("Accepted", "Overridden", "No antibiotic")
+NO_ANTIBIOTIC_REASONS = ("No urinary symptoms (asymptomatic bacteriuria)", "Awaiting culture result",
+                         "Symptoms resolved", "Other")
 OVERRIDE_REASONS = ("Allergy or intolerance", "Kidney function", "Pregnancy",
                     "Patient-specific considerations", "Clinician preference", "Other")
 FOLLOW_UP_REASONS = ("Culture resistance mismatch", "Symptoms worsening or not improving",
@@ -453,12 +481,108 @@ def save_prescription(clinician_id: int, patient_number: str, recommended_drug: 
         if patient_id is None or connection.execute(
                 sa.select(prescriptions.c.id).where(prescriptions.c.patient_id == patient_id)).first():
             return False
+        logged = _latest_assessment(connection, patient_id)
+        if logged:      # close the logged assessment with what was decided
+            connection.execute(assessments.update().where(assessments.c.id == logged["id"]).values(
+                outcome="Accepted" if accepted else "Overridden",
+                outcome_reason=None if accepted else reason,
+                outcome_notes=None if accepted else notes.strip(),
+                decided_at=datetime.datetime.now()))
         connection.execute(prescriptions.insert().values(
+            assessment_id=logged["id"] if logged else None,
             patient_id=patient_id, prescribed_by=clinician_id, recommended_drug=recommended_drug,
             drug=drug, dose=dose, frequency=frequency, duration_days=int(days),
             started_on=datetime.date.today(), decision="Accepted" if accepted else "Overridden",
             override_reason=None if accepted else reason,
             override_notes=None if accepted else notes.strip()))
+    return True
+
+
+# ----------------------------------------------------------------------------- the assessment log
+
+def _patient_id(connection, clinician_id: int, patient_number: str):
+    return connection.execute(
+        sa.select(patients.c.id)
+        .join(clinician_patients, clinician_patients.c.patient_id == patients.c.id)
+        .where(clinician_patients.c.clinician_id == clinician_id,
+               patients.c.patient_number == patient_number)).scalar()
+
+
+def _latest_assessment(connection, patient_id: int) -> dict | None:
+    row = connection.execute(
+        sa.select(assessments).where(assessments.c.patient_id == patient_id)
+        .order_by(assessments.c.assessed_at.desc(), assessments.c.id.desc())).mappings().first()
+    return dict(row) if row else None
+
+
+def log_assessment(clinician_id: int, patient_number: str, recommended_drug: str, target: float,
+                   chances: dict, cleared_bar: bool, checks: dict, model_source: str,
+                   url: str | None = None) -> int | None:
+    """Log that this recommendation was produced for this patient. Returns the log row's id.
+
+    Looking at the same recommendation again is not a new assessment: if the patient's latest
+    logged assessment recommended the same antibiotic, that row is kept and its id returned.
+    Nothing is logged for a patient who already has a prescription, or isn't this clinician's.
+    """
+    with engine(url).begin() as connection:
+        patient_id = _patient_id(connection, clinician_id, patient_number)
+        if patient_id is None or connection.execute(
+                sa.select(prescriptions.c.id).where(prescriptions.c.patient_id == patient_id)).first():
+            return None
+        latest = _latest_assessment(connection, patient_id)
+        if latest and latest["recommended_drug"] == recommended_drug:
+            return latest["id"]
+        result = connection.execute(assessments.insert().values(
+            patient_id=patient_id, clinician_id=clinician_id, assessed_at=datetime.datetime.now(),
+            model_source=model_source, target=target, recommended_drug=recommended_drug,
+            cleared_bar=bool(cleared_bar),
+            chances={drug: round(float(chance), 4) for drug, chance in chances.items()},
+            prechecks=checks))
+        return result.inserted_primary_key[0]
+
+
+def assessment_for(clinician_id: int, patient_number: str, url: str | None = None) -> dict | None:
+    """The patient's latest logged assessment, with who decided it, if they are this clinician's."""
+    with engine(url).connect() as connection:
+        patient_id = _patient_id(connection, clinician_id, patient_number)
+        row = _latest_assessment(connection, patient_id) if patient_id else None
+        if row:
+            row["clinician"] = connection.execute(
+                sa.select(clinicians.c.name).where(clinicians.c.id == row["clinician_id"])).scalar()
+    return row
+
+
+def assessments_for(clinician_id: int, url: str | None = None) -> list[dict]:
+    """Every logged assessment for this clinician's patients, oldest first."""
+    query = (sa.select(assessments, patients.c.patient_number)
+             .join(patients, patients.c.id == assessments.c.patient_id)
+             .join(clinician_patients, clinician_patients.c.patient_id == patients.c.id)
+             .where(clinician_patients.c.clinician_id == clinician_id)
+             .order_by(assessments.c.assessed_at, assessments.c.id))
+    with engine(url).connect() as connection:
+        return [dict(row) for row in connection.execute(query).mappings()]
+
+
+def record_no_antibiotic(clinician_id: int, patient_number: str, reason: str, notes: str = "",
+                         url: str | None = None) -> bool:
+    """Record on the logged assessment that the clinician decided not to prescribe.
+
+    False if there is no logged assessment, the patient already has a prescription, or the
+    patient isn't this clinician's.
+    """
+    if reason not in NO_ANTIBIOTIC_REASONS:
+        raise ValueError("Deciding not to treat needs a reason from NO_ANTIBIOTIC_REASONS.")
+    with engine(url).begin() as connection:
+        patient_id = _patient_id(connection, clinician_id, patient_number)
+        if patient_id is None or connection.execute(
+                sa.select(prescriptions.c.id).where(prescriptions.c.patient_id == patient_id)).first():
+            return False
+        latest = _latest_assessment(connection, patient_id)
+        if not latest:
+            return False
+        connection.execute(assessments.update().where(assessments.c.id == latest["id"]).values(
+            outcome="No antibiotic", outcome_reason=reason, outcome_notes=notes.strip(),
+            clinician_id=clinician_id, decided_at=datetime.datetime.now()))
     return True
 
 

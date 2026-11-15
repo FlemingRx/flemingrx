@@ -12,8 +12,9 @@ assigned to them. Screens, from the sidebar:
 - **Clinical Assessment**: opens on the list of the clinician's patients. Selecting one shows
   their details from the database, four pre-checks (symptoms, allergies, kidney function,
   pregnancy), each antibiotic's predicted chance of working, and the pick. The clinician accepts
-  the recommendation or overrides it with a reason, which is saved as a prescription; if the
-  patient already has one, it is shown instead. Its **Evidence** tab has the trade-off chart from
+  the recommendation, overrides it with a reason, or decides not to treat; the first two are
+  saved as a prescription, and if the patient already has one it is shown instead. Each
+  recommendation and what was decided is written to the assessment log. Its **Evidence** tab has the trade-off chart from
   `notebooks/04_recommend.py` and its **Limits** tab says what the tool does not do.
 - **Culture Results**: four counts (pending, ready for review, resistance mismatches, reviewed)
   and the list of the clinician's cultures. Selecting one shows the patient's details, the
@@ -56,7 +57,7 @@ records instead means filling the `patients` table from them; nothing else has t
 
 ## The database
 
-Seven tables (defined in `db.py`):
+Eight tables (defined in `db.py`):
 
 | Table | What it holds |
 |---|---|
@@ -64,6 +65,7 @@ Seven tables (defined in `db.py`):
 | `patients` | One row per patient: patient number and the details the model uses (age band, sex, care setting, nursing home contact, resistance history, antibiotic exposure, earlier organisms, procedures), plus what the pre-checks use (symptoms, allergies, eGFR, pregnancy). |
 | `clinician_patients` | One row per clinician and patient pair, so a patient can have several clinicians. |
 | `prescriptions` | What the model recommended for a patient and what the clinician prescribed: drug, dose, frequency, duration, start date, whether it was an acceptance or an override, and the override reason. |
+| `assessments` | The log. One row each time a recommendation is produced for a patient without a prescription: when, by which model, the bar, each antibiotic's predicted chance of working, whether anything cleared the bar, what the pre-checks found, and what the clinician decided (accepted, overridden, or no antibiotic) with the reason. |
 | `cultures` | One row per urine culture: specimen, dates, organism, colony count, and the clinician's review (decision, notes, who, when). |
 | `susceptibilities` | One row per culture and antibiotic tested: susceptible, intermediate or resistant. |
 | `follow_ups` | One row per patient being followed after a prescription: the reason and where it came from, what has been documented since (symptoms, adherence, adverse reactions, notes), the queue status, and the clinician's reassessment. |
