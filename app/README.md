@@ -13,8 +13,13 @@ assigned to them. Screens, from the sidebar:
   their details from the database, each antibiotic's predicted chance of working, and the pick.
   Its **Evidence** tab has the trade-off chart from `notebooks/04_recommend.py` and its
   **Limits** tab says what the tool does not do.
-- **Coming next**: Patient Encounters, Culture Results, Follow-up and Stewardship Analytics are
-  placeholders that say what each will hold.
+- **Culture Results**: four counts (pending, ready for review, resistance mismatches, reviewed)
+  and the list of the clinician's cultures. Selecting one shows the patient's details, the
+  culture, the lab's susceptibility results, how the current prescription compares with them,
+  and a form to record the clinician's review. A mismatch is a prompt to reassess; nothing here
+  changes a prescription.
+- **Coming next**: Patient Encounters, Follow-up and Stewardship Analytics are placeholders that
+  say what each will hold.
 
 ## How it fits together
 
@@ -22,10 +27,12 @@ assigned to them. Screens, from the sidebar:
 |---|---|
 | `app.py` | The frame around every screen (sign-in, sidebar, top bar) and the clinical assessment. |
 | `dashboard.py` | The dashboard and its sample data. |
+| `culture_results.py` | The culture worklist and the page for one culture. |
+| `ui.py` | Building blocks the screens share: cards and the read-only patient record. |
 | `policy.py` | The recommendation rule: the narrowest antibiotic that clears the bar. |
 | `data.py` | Loads the model and tables; turns a patient's database row into model features. |
 | `db.py` | The database: clinicians, patients, who looks after whom, and password checking. |
-| `seed.py` | The fabricated demo clinicians and patients, loaded into an empty database. |
+| `seed.py` | The fabricated demo clinicians, patients, prescriptions and cultures, loaded into an empty database. |
 | `app.yaml` | Databricks Apps configuration. |
 | `styles.css`, `.streamlit/config.toml`, `assets/` | The FlemingRx look: brand colours and fonts, card and result-panel styling, the logo. |
 
@@ -35,13 +42,16 @@ records instead means filling the `patients` table from them; nothing else has t
 
 ## The database
 
-Three tables (defined in `db.py`):
+Six tables (defined in `db.py`):
 
 | Table | What it holds |
 |---|---|
 | `clinicians` | One row per login: username, name, role, and a salted hash of the password. |
 | `patients` | One row per patient: patient number and the details the model uses (age band, sex, care setting, nursing home contact, resistance history, antibiotic exposure, earlier organisms, procedures). |
 | `clinician_patients` | One row per clinician and patient pair, so a patient can have several clinicians. |
+| `prescriptions` | What the model recommended for a patient and what the clinician prescribed: drug, dose, frequency, duration, start date. |
+| `cultures` | One row per urine culture: specimen, dates, organism, colony count, and the clinician's review (decision, notes, who, when). |
+| `susceptibilities` | One row per culture and antibiotic tested: susceptible, intermediate or resistant. |
 
 The app uses Lakebase (Databricks' managed Postgres), both deployed and on a laptop. The workspace
 has a Lakebase project for this, `flemingrx`, holding the tables and demo data in a schema called

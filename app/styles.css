@@ -314,3 +314,51 @@ button[data-variant="pills"] { border-radius: 0 !important; }
 .fx-kv:last-child { border-bottom: 0; padding-bottom: 0; }
 .fx-kv span { color: var(--fx-muted); flex: none; max-width: 55%; }
 .fx-kv b { color: var(--fx-ink); font-weight: 600; text-align: right; }
+
+/* ---------- culture results ---------- */
+.fx-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem; margin: .2rem 0 .3rem; }
+@media (max-width: 720px) { .fx-tiles { grid-template-columns: repeat(2, 1fr); } }
+.fx-tile { background: #fff; border: 1px solid var(--fx-line); border-top: 3px solid; padding: .8rem 1rem;
+  display: flex; flex-direction: column; gap: .15rem; }
+.fx-tile b { font-family: "Plus Jakarta Sans", Inter, sans-serif; font-size: 1.9rem; font-weight: 800; line-height: 1.1; }
+.fx-tile span { font-size: .8rem; font-weight: 500; color: var(--fx-muted); }
+.fx-tile-navy { border-top-color: var(--fx-navy); } .fx-tile-navy b { color: var(--fx-navy); }
+.fx-tile-amber { border-top-color: var(--fx-amber); } .fx-tile-amber b { color: var(--fx-amber); }
+.fx-tile-red { border-top-color: var(--fx-red); } .fx-tile-red b { color: var(--fx-red); }
+.fx-tile-teal { border-top-color: var(--fx-teal); } .fx-tile-teal b { color: #00796d; }
+
+/* the case list reuses the patient list's rows; the status sits at the right-hand end */
+.st-key-caselist { gap: .35rem !important; }
+.st-key-caselist button { background: #fff; border: 1px solid var(--fx-line); padding: .7rem .9rem; }
+.st-key-caselist button:hover { border-color: var(--fx-teal); background: var(--fx-teal-soft); color: var(--fx-ink); }
+.st-key-caselist button > div, .st-key-caselist button > div > span { width: 100%; }
+.st-key-caselist button > div > span { justify-content: space-between; flex-direction: row-reverse; }
+.st-key-caselist button [data-testid="stMarkdownContainer"] { flex: 1; }
+.st-key-caselist button p { text-align: left; font-size: .84rem; }
+.st-key-caselist button p strong { color: var(--fx-navy); font-size: .92rem; margin-right: .9rem;
+  font-variant-numeric: tabular-nums; }
+.st-key-caselist button p span:last-of-type { float: right; font-weight: 700; font-size: .78rem; margin-right: .6rem; }
+
+.fx-section { font-size: .7rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--fx-muted); padding-top: .2rem; }
+.fx-state-red, .fx-res-bad { color: var(--fx-red) !important; }
+.fx-state-orange, .fx-res-warn { color: var(--fx-amber) !important; }
+.fx-state-green, .fx-res-ok { color: #00796d !important; }
+.fx-state-gray { color: var(--fx-muted); }
+.fx-kv span i { font-style: normal; font-size: .68rem; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--fx-navy); background: #e9edf7; padding: .1rem .4rem; margin-left: .5rem; }
+
+.fx-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+@media (max-width: 720px) { .fx-compare { grid-template-columns: 1fr; } }
+.fx-compare > div { display: flex; flex-direction: column; gap: .2rem; }
+.fx-eyebrow-dark { font-size: .68rem; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--fx-muted); }
+.fx-compare b { font-family: "Plus Jakarta Sans", Inter, sans-serif; font-size: 1.1rem; font-weight: 800; color: var(--fx-navy); }
+.fx-compare small { font-size: .8rem; line-height: 1.45; color: var(--fx-muted); }
+.fx-verdict { display: flex; flex-direction: column; gap: .2rem; padding: .7rem .9rem; border: 1px solid; border-left-width: 4px; }
+.fx-verdict b { font-size: .9rem; } .fx-verdict span { font-size: .82rem; line-height: 1.45; color: var(--fx-ink); }
+.fx-verdict-ok { background: var(--fx-teal-soft); border-color: var(--fx-teal); } .fx-verdict-ok b { color: #00796d; }
+.fx-verdict-bad { background: var(--fx-red-soft); border-color: var(--fx-red); } .fx-verdict-bad b { color: var(--fx-red); }
+.fx-verdict-warn { background: var(--fx-amber-soft); border-color: var(--fx-amber); } .fx-verdict-warn b { color: var(--fx-amber); }
+.fx-verdict-note { background: var(--fx-head); border-color: #c3cad8; } .fx-verdict-note b { color: var(--fx-navy); }
+.st-key-review_save button { background: var(--fx-navy); border-color: var(--fx-navy); }
+.st-key-review_save button:hover:not(:disabled) { background: var(--fx-teal); border-color: var(--fx-teal); }

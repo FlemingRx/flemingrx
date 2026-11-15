@@ -2,7 +2,7 @@
 
 This file is the frame around every screen (sign-in, sidebar, top bar, footer) and holds the
 clinical assessment: the signed-in clinician's patients, and for each one a recommended antibiotic.
-The dashboard is in dashboard.py, the database in db.py. Screens that are planned but not built
+The dashboard is in dashboard.py, culture results in culture_results.py, the database in db.py. Screens that are planned but not built
 yet are listed in PLANNED below.
 
 Run locally with `streamlit run app.py` from this folder (see README.md for the two settings a
@@ -21,10 +21,12 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+import culture_results
 import dashboard
 import data
 import db
 import policy
+from ui import card, patient_record
 
 HERE = pathlib.Path(__file__).parent
 LOGO = HERE / "assets" / "flemingrx-logo.png"
@@ -61,16 +63,6 @@ def image_data_uri(path: pathlib.Path) -> str:
 
 # ----------------------------------------------------------------------------- building blocks
 
-def card(key: str, icon: str, title: str, hint: str | None = None):
-    """A white card with a header row, like the sections of a clinical form. Returns its body."""
-    box = st.container(border=True, key=f"card_{key}")
-    with box.container(key=f"cardhead_{key}", horizontal=True, vertical_alignment="center"):
-        st.markdown(f":material/{icon}: **{title}**")
-        if hint:
-            st.caption(hint)
-    return box
-
-
 def top_bar(page_title: str, sample_data: bool):
     sample = '<span class="fx-chip fx-chip-amber">Sample data</span>' if sample_data else ""
     st.html(f"""
@@ -90,16 +82,6 @@ SPECTRUM_CLASS = {"Narrow": "narrow", "Medium": "medium", "Broad": "broad"}
 
 
 # ----------------------------------------------------------------------------- patients
-
-def last_antibiotic_text(days: int) -> str:
-    if days >= data.NO_RECENT_ANTIBIOTIC:
-        return "None in the past year"
-    return f"About {days} days ago"
-
-
-def names(slugs, label=data.pretty) -> str:
-    return ", ".join(label(slug) for slug in slugs) or "None"
-
 
 def patient_summary(record: dict) -> str:
     """The one-line description under a patient number."""
@@ -124,33 +106,6 @@ def patient_list(clinician: dict):
                          icon=":material/chevron_right:", width="stretch"):
                 st.session_state["patient"] = number
                 st.rerun()
-
-
-def record_card(key: str, icon: str, title: str, rows: list, hint: str | None = None):
-    """A read-only card of (label, value) rows from the patient's record."""
-    body = "".join(f'<div class="fx-kv"><span>{html.escape(label)}</span>'
-                   f'<b>{html.escape(str(value))}</b></div>' for label, value in rows)
-    with card(key, icon, title, hint):
-        st.html(body)
-
-
-def patient_record(record: dict):
-    record_card("demo", "person", "Demographics",
-                [("Age", record["age_band"]), ("Biological sex", record["sex"])])
-    record_card("setting", "local_hospital", "Care setting",
-                [("Where the culture was ordered", record["care_setting"]),
-                 ("Nursing home contact on record", "Yes" if record["nursing_home"] else "No")])
-    record_card("resist", "coronavirus", "Resistance history",
-                [("Earlier culture resistant to", names(record["resistant_to"], policy.drug_label)),
-                 ("Other antibiotics with resistance", record["other_resistant_count"])],
-                "past 12 months")
-    record_card("abx", "medication", "Antibiotic exposure",
-                [("Classes taken in the last 90 days", names(record["recent_antibiotic_classes"])),
-                 ("Most recent antibiotic of any kind",
-                  last_antibiotic_text(record["days_since_last_antibiotic"]))])
-    record_card("micro", "biotech", "Microbiology & procedures",
-                [("Organisms grown in the past year", names(record["prior_organisms"])),
-                 ("Procedures in the last 90 days", names(record["recent_procedures"]))])
 
 
 # ----------------------------------------------------------------------------- result panel
@@ -369,9 +324,6 @@ PLANNED = [
     ("Patient Encounters", "patients", "group",
      "Each patient's wider history in one place: allergies, current medicines, kidney and liver "
      "function, earlier infections and past culture results."),
-    ("Culture Results", "cultures", "biotech",
-     "Urine culture and susceptibility results as they come back, with a flag when the empiric "
-     "choice should be reconsidered or can be narrowed."),
     ("Follow-up", "follow-up", "event_repeat",
      "What happens after treatment starts: response, side effects, reassessment reminders and "
      "treatment completion."),
@@ -412,9 +364,13 @@ home = st.Page(lambda: dashboard.render(clinician), title="Dashboard", url_path=
                icon=":material/dashboard:", default=True)
 planned = [st.Page(planned_page(icon, title, body), title=title, url_path=path,
                    icon=f":material/{icon}:") for title, path, icon, body in PLANNED]
-current = st.navigation({"Workspace": [home, assessment], "Coming next": planned})
-if current is not assessment:      # coming back to the assessment starts at the patient list
+cultures = st.Page(lambda: culture_results.render(clinician), title="Culture Results",
+                   url_path="cultures", icon=":material/biotech:")
+current = st.navigation({"Workspace": [home, assessment, cultures], "Coming next": planned})
+if current is not assessment:      # coming back to a screen starts at its list
     st.session_state.pop("patient", None)
+if current is not cultures:
+    st.session_state.pop("culture", None)
 
 st.logo(str(LOGO_LIGHT), size="large", icon_image=str(MARK))
 with st.sidebar:
@@ -425,7 +381,7 @@ with st.sidebar:
         st.rerun()
     st.html('<div class="fx-sidenote"><b>Research demo</b>Fabricated patients. '
             'Not for clinical use.</div>')
-top_bar(current.title, sample_data=current in (home, assessment))
+top_bar(current.title, sample_data=current in (home, assessment, cultures))
 
 current.run()
 

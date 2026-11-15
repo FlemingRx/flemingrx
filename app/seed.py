@@ -1,4 +1,5 @@
-"""Fabricated demo data: three clinicians and the patients assigned to them.
+"""Fabricated demo data: three clinicians, their patients, and each patient's prescription and
+urine culture.
 
 NONE OF THIS IS REAL. The clinicians and patients are made up for the hackathon demo, and the
 passwords below are demo passwords, here so anyone running the demo can sign in. Do not reuse
@@ -8,6 +9,8 @@ db.init() loads this once, into an empty database. To reload it after editing, e
 tables (in the Lakebase SQL editor: TRUNCATE flemingrx.clinicians, flemingrx.patients CASCADE)
 and start the app again.
 """
+
+import datetime
 
 import db
 
@@ -83,6 +86,60 @@ PATIENTS = [
 ]
 
 
+# Usual adult regimens, used only to make the demo prescriptions look plausible.
+REGIMENS = {
+    "nitrofurantoin": ("100 mg", "Twice daily", 5),
+    "trimethoprim_sulfamethoxazole": ("160/800 mg", "Twice daily", 3),
+    "cefazolin": ("1 g IV", "Every 8 hours", 7),
+    "ciprofloxacin": ("500 mg", "Twice daily", 7),
+    "ceftriaxone": ("1 g IV", "Once daily", 7),
+    "piperacillin_tazobactam": ("4.5 g IV", "Every 8 hours", 7),
+    "meropenem": ("1 g IV", "Every 8 hours", 7),
+}
+
+# The antibiotics on the lab's panel, in the order of the S/R letters in CASES below.
+PANEL = ["ampicillin", "nitrofurantoin", "trimethoprim_sulfamethoxazole", "cefazolin",
+         "ciprofloxacin", "ceftriaxone", "piperacillin_tazobactam", "meropenem"]
+
+# One prescription and one culture per patient:
+# (patient, culture number, model's recommendation at a 90% bar, drug prescribed, prescribed by,
+#  days since the culture was collected, specimen, organism, colony count, panel results, review)
+# The recommendations are what the model really returns for each fabricated patient.
+# Organism None means the lab has not reported yet. `review` is (decision, notes, reviewer) or None.
+CASES = [
+    ("PT-00377", "CX-2207", "cefazolin", "nitrofurantoin", "sarahmitchell", 1,
+     "Urine, clean catch", None, None, None, None),
+    ("PT-00389", "CX-2196", "piperacillin_tazobactam", "ceftriaxone", "praman", 3,
+     "Urine, clean catch", "Escherichia coli", 100000, "RSSSSSSS", None),
+    ("PT-00391", "CX-2193", "piperacillin_tazobactam", "ciprofloxacin", "sarahmitchell", 3,
+     "Urine, catheter", "Escherichia coli", 100000, "RSRSRSSS", None),
+    ("PT-00399", "CX-2199", "nitrofurantoin", "nitrofurantoin", "sarahmitchell", 2,
+     "Urine, clean catch", "Escherichia coli", 100000, "RSRSSSSS", None),
+    ("PT-00401", "CX-2191", "piperacillin_tazobactam", "piperacillin_tazobactam", "sarahmitchell", 4,
+     "Urine, catheter", "Klebsiella pneumoniae", 100000, "RRRRRRSS", None),
+    ("PT-00408", "CX-2194", "piperacillin_tazobactam", "trimethoprim_sulfamethoxazole", "jokafor", 3,
+     "Urine, clean catch", "Proteus mirabilis", 50000, "SRRSSSSS", None),
+    ("PT-00410", "CX-2188", "ceftriaxone", "nitrofurantoin", "sarahmitchell", 5,
+     "Urine, clean catch", "Escherichia coli", 100000, "SSSSSSSS",
+     ("Compatible", "Susceptible to nitrofurantoin. Continue the 5-day course.", "sarahmitchell")),
+    ("PT-00412", "CX-2198", "piperacillin_tazobactam", "piperacillin_tazobactam", "sarahmitchell", 2,
+     "Urine, catheter", "Escherichia coli", 100000, "RSSRRSSS", None),
+    ("PT-00403", "CX-2190", "piperacillin_tazobactam", "piperacillin_tazobactam", "jokafor", 4,
+     "Urine, catheter", "Enterococcus faecalis", 50000, "SSRRRRSS", None),
+    ("PT-00409", "CX-2205", "cefazolin", "nitrofurantoin", "jokafor", 1,
+     "Urine, clean catch", None, None, None, None),
+    ("PT-00415", "CX-2201", "piperacillin_tazobactam", "ceftriaxone", "praman", 2,
+     "Urine, clean catch", "Klebsiella pneumoniae", 100000, "RRSRSRSS", None),
+    ("PT-00418", "CX-2187", "piperacillin_tazobactam", "ciprofloxacin", "praman", 5,
+     "Urine, clean catch", "Escherichia coli", 100000, "RSSSSSSS",
+     ("Compatible", "Susceptible to ciprofloxacin. No change.", "praman")),
+    ("PT-00421", "CX-2200", "piperacillin_tazobactam", "ceftriaxone", "praman", 2,
+     "Urine, clean catch", "Escherichia coli", 100000, "RSRSRSSS", None),
+]
+
+_RESULT = {"S": "Susceptible", "I": "Intermediate", "R": "Resistant"}
+
+
 def load(connection) -> None:
     """Insert the clinicians, the patients, and who looks after whom."""
     clinician_ids = {}
@@ -97,3 +154,37 @@ def load(connection) -> None:
         for username in patient["clinicians"]:
             connection.execute(db.clinician_patients.insert().values(
                 clinician_id=clinician_ids[username], patient_id=patient_id))
+
+
+def load_cultures(connection) -> None:
+    """Insert a prescription and a culture (with its panel results) for each patient in CASES.
+
+    Dates are counted back from today, so the demo always looks current.
+    """
+    today = datetime.date.today()
+    patient_ids = dict(connection.execute(
+        db.sa.select(db.patients.c.patient_number, db.patients.c.id)).all())
+    clinician_ids = dict(connection.execute(
+        db.sa.select(db.clinicians.c.username, db.clinicians.c.id)).all())
+    for (patient, number, recommended, drug, prescriber, days_ago, specimen, organism, colonies,
+         panel, review) in CASES:
+        if patient not in patient_ids:
+            continue
+        collected = today - datetime.timedelta(days=days_ago)
+        dose, frequency, duration = REGIMENS[drug]
+        connection.execute(db.prescriptions.insert().values(
+            patient_id=patient_ids[patient], prescribed_by=clinician_ids[prescriber],
+            recommended_drug=recommended, drug=drug, dose=dose, frequency=frequency,
+            duration_days=duration, started_on=collected))
+        decision, notes, reviewer = review or (None, None, None)
+        result = connection.execute(db.cultures.insert().values(
+            culture_number=number, patient_id=patient_ids[patient], specimen=specimen,
+            collected_on=collected,
+            resulted_on=collected + datetime.timedelta(days=2) if organism else None,
+            organism=organism, colony_count=colonies, review_decision=decision, review_notes=notes,
+            reviewed_by=clinician_ids.get(reviewer),
+            reviewed_at=datetime.datetime.combine(today, datetime.time(9, 0)) if review else None))
+        for antibiotic, letter in zip(PANEL, panel or ""):
+            connection.execute(db.susceptibilities.insert().values(
+                culture_id=result.inserted_primary_key[0], antibiotic=antibiotic,
+                result=_RESULT[letter]))

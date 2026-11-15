@@ -107,3 +107,54 @@ def test_database_url_overrides_lakebase(monkeypatch):
     assert db.database_url() == "postgresql+psycopg://u:p@host:5432/name"
     monkeypatch.setenv("DATABASE_URL", "sqlite:///flemingrx.db")
     assert db.database_url() == "sqlite:///flemingrx.db" and db.database_kind() == "SQLite (local file)"
+
+
+def test_cultures_are_limited_to_the_clinicians_patients(url):
+    for person in seed.CLINICIANS:
+        clinician = db.sign_in(person["username"], person["password"], url)
+        mine = {p["patient_number"] for p in db.patients_for(clinician["id"], url)}
+        cases = db.cultures_for(clinician["id"], url)
+        assert {case["patient_number"] for case in cases} == mine and len(cases) == len(mine)
+
+    okafor = db.sign_in("jokafor", password_of("jokafor"), url)
+    assert db.culture_for(okafor["id"], "CX-2193", url) is None            # PT-00391 is Mitchell's
+    assert db.review_culture(okafor["id"], "CX-2193", "Compatible", "", url) is False
+
+
+def test_culture_status_and_prescription_comparison(url):
+    mitchell = db.sign_in("sarahmitchell", password_of("sarahmitchell"), url)
+    status = {case["culture_number"]: db.culture_status(case)
+              for case in db.cultures_for(mitchell["id"], url)}
+    assert status == {"CX-2207": "Pending", "CX-2196": "Ready for review",
+                      "CX-2193": "Resistance mismatch", "CX-2199": "Ready for review",
+                      "CX-2191": "Ready for review", "CX-2194": "Resistance mismatch",
+                      "CX-2188": "Reviewed", "CX-2198": "Ready for review"}
+
+    case = db.culture_for(mitchell["id"], "CX-2193", url)
+    assert case["patient"]["patient_number"] == "PT-00391" and case["organism"] == "Escherichia coli"
+    assert case["prescription"]["drug"] == "ciprofloxacin"
+    assert case["prescription"]["recommended_drug"] == "piperacillin_tazobactam"
+    assert db.prescription_result(case) == "Resistant" and len(case["susceptibilities"]) == 8
+
+    pending = db.culture_for(mitchell["id"], "CX-2207", url)
+    assert pending["susceptibilities"] == {} and db.prescription_result(pending) is None
+
+
+def test_reviewing_a_culture(url):
+    mitchell = db.sign_in("sarahmitchell", password_of("sarahmitchell"), url)
+    assert db.review_culture(mitchell["id"], "CX-2207", "Compatible", "", url) is False   # no result yet
+    with pytest.raises(ValueError):
+        db.review_culture(mitchell["id"], "CX-2193", "Looks fine", "", url)
+
+    assert db.review_culture(mitchell["id"], "CX-2193", "Reassessment needed", " Switch agent. ", url)
+    case = db.culture_for(mitchell["id"], "CX-2193", url)
+    assert db.culture_status(case) == "Reviewed" and case["review_notes"] == "Switch agent."
+    assert case["reviewer"] == "Dr. Sarah Mitchell" and case["reviewed_at"] is not None
+
+
+def test_seed_cases_use_known_patients_drugs_and_results():
+    numbers = {patient["row"]["patient_number"] for patient in seed.PATIENTS}
+    assert {case[0] for case in seed.CASES} == numbers           # one culture per patient
+    for case in seed.CASES:
+        assert case[2] in seed.REGIMENS and case[3] in seed.REGIMENS
+        assert case[9] is None or (len(case[9]) == len(seed.PANEL) and set(case[9]) <= set("SIR"))

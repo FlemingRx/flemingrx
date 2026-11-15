@@ -1,9 +1,12 @@
 """The database: clinicians, patients, and which clinician looks after which patient.
 
-Three tables:
+The tables:
   clinicians          one row per login (the password is stored as a salted hash, never as text)
   patients            one row per patient, holding the details the model needs
   clinician_patients  one row per (clinician, patient) pair, so a patient can have several clinicians
+  prescriptions       what the model recommended for a patient and what the clinician prescribed
+  cultures            one row per urine culture: what grew, and the clinician's review of the result
+  susceptibilities    one row per culture and antibiotic tested: susceptible, intermediate or resistant
 
 Where the database lives:
   Databricks Lakebase (Postgres), by default, both deployed and on a laptop. There is no stored
@@ -16,6 +19,7 @@ The same code runs on all of them. The first time it finds an empty database it 
 and fills them with the fabricated demo data in seed.py.
 """
 
+import datetime
 import functools
 import hashlib
 import hmac
@@ -58,6 +62,50 @@ clinician_patients = sa.Table(
     sa.Column("clinician_id", sa.ForeignKey("clinicians.id", ondelete="CASCADE"), primary_key=True),
     sa.Column("patient_id", sa.ForeignKey("patients.id", ondelete="CASCADE"), primary_key=True),
 )
+
+# One row per treatment course. `recommended_drug` is what the model suggested at the time and
+# `drug` is what the clinician prescribed; they differ when the clinician overrode the model.
+# Drug names are the model's short names, e.g. "nitrofurantoin" (see policy.DRUG_LABELS).
+prescriptions = sa.Table(
+    "prescriptions", metadata,
+    sa.Column("id", sa.Integer, primary_key=True),
+    sa.Column("patient_id", sa.ForeignKey("patients.id", ondelete="CASCADE"), nullable=False),
+    sa.Column("prescribed_by", sa.ForeignKey("clinicians.id"), nullable=False),
+    sa.Column("recommended_drug", sa.String(64), nullable=False),
+    sa.Column("drug", sa.String(64), nullable=False),
+    sa.Column("dose", sa.String(64), nullable=False),              # e.g. "100 mg"
+    sa.Column("frequency", sa.String(64), nullable=False),         # e.g. "Twice daily"
+    sa.Column("duration_days", sa.Integer, nullable=False),
+    sa.Column("started_on", sa.Date, nullable=False),
+)
+
+# A culture is "pending" until the lab reports (resulted_on, organism and colony count are empty
+# until then). The four review columns stay empty until a clinician marks the result as reviewed.
+cultures = sa.Table(
+    "cultures", metadata,
+    sa.Column("id", sa.Integer, primary_key=True),
+    sa.Column("culture_number", sa.String(32), nullable=False, unique=True),
+    sa.Column("patient_id", sa.ForeignKey("patients.id", ondelete="CASCADE"), nullable=False),
+    sa.Column("specimen", sa.String(64), nullable=False),
+    sa.Column("collected_on", sa.Date, nullable=False),
+    sa.Column("resulted_on", sa.Date),
+    sa.Column("organism", sa.String(120)),
+    sa.Column("colony_count", sa.Integer),                         # CFU/mL
+    sa.Column("review_decision", sa.String(32)),                   # one of REVIEW_DECISIONS
+    sa.Column("review_notes", sa.Text),
+    sa.Column("reviewed_by", sa.ForeignKey("clinicians.id")),
+    sa.Column("reviewed_at", sa.DateTime),
+)
+
+susceptibilities = sa.Table(
+    "susceptibilities", metadata,
+    sa.Column("culture_id", sa.ForeignKey("cultures.id", ondelete="CASCADE"), primary_key=True),
+    sa.Column("antibiotic", sa.String(64), primary_key=True),
+    sa.Column("result", sa.String(16), nullable=False),            # one of RESULTS
+)
+
+RESULTS = ("Susceptible", "Intermediate", "Resistant")
+REVIEW_DECISIONS = ("Compatible", "Reassessment needed", "Other")
 
 
 # ----------------------------------------------------------------------------- connection
@@ -147,8 +195,13 @@ def init(url: str | None = None) -> None:
             connection.execute(sa.text(f'CREATE SCHEMA IF NOT EXISTS "{LAKEBASE_SCHEMA}"'))
     metadata.create_all(db)
     with db.begin() as connection:
-        if connection.execute(sa.select(sa.func.count()).select_from(clinicians)).scalar() == 0:
+        def empty(table):
+            return connection.execute(sa.select(sa.func.count()).select_from(table)).scalar() == 0
+
+        if empty(clinicians):
             seed.load(connection)
+        if empty(cultures):       # added after the first databases were filled, so checked by itself
+            seed.load_cultures(connection)
 
 
 # ----------------------------------------------------------------------------- passwords
@@ -208,3 +261,84 @@ def patient_for(clinician_id: int, patient_number: str, url: str | None = None) 
     with engine(url).connect() as connection:
         row = connection.execute(query).mappings().first()
     return dict(row) if row else None
+
+
+# ----------------------------------------------------------------------------- cultures
+
+def _cases(connection, clinician_id: int, culture_number: str | None = None) -> list[dict]:
+    """Cultures for this clinician's patients, each with its patient, prescription and results."""
+    query = (sa.select(cultures, patients.c.patient_number)
+             .join(patients, patients.c.id == cultures.c.patient_id)
+             .join(clinician_patients, clinician_patients.c.patient_id == patients.c.id)
+             .where(clinician_patients.c.clinician_id == clinician_id)
+             .order_by(cultures.c.collected_on.desc(), cultures.c.culture_number))
+    if culture_number:
+        query = query.where(cultures.c.culture_number == culture_number)
+    cases = [dict(row) for row in connection.execute(query).mappings()]
+    if not cases:
+        return []
+
+    results = connection.execute(
+        sa.select(susceptibilities).where(susceptibilities.c.culture_id.in_([c["id"] for c in cases]))
+        .order_by(susceptibilities.c.antibiotic)).mappings().all()
+    # The current prescription is the patient's most recently started one.
+    courses = connection.execute(
+        sa.select(prescriptions).where(prescriptions.c.patient_id.in_([c["patient_id"] for c in cases]))
+        .order_by(prescriptions.c.started_on, prescriptions.c.id)).mappings().all()
+    current = {course["patient_id"]: dict(course) for course in courses}
+    for case in cases:
+        case["susceptibilities"] = {row["antibiotic"]: row["result"] for row in results
+                                    if row["culture_id"] == case["id"]}
+        case["prescription"] = current.get(case["patient_id"])
+    return cases
+
+
+def cultures_for(clinician_id: int, url: str | None = None) -> list[dict]:
+    """Every culture for this clinician's patients, newest first."""
+    with engine(url).connect() as connection:
+        return _cases(connection, clinician_id)
+
+
+def culture_for(clinician_id: int, culture_number: str, url: str | None = None) -> dict | None:
+    """One culture with its patient's full record, but only for a patient of this clinician."""
+    with engine(url).connect() as connection:
+        cases = _cases(connection, clinician_id, culture_number)
+        if not cases:
+            return None
+        case = cases[0]
+        case["patient"] = dict(connection.execute(
+            sa.select(patients).where(patients.c.id == case["patient_id"])).mappings().one())
+        if case["reviewed_by"]:
+            case["reviewer"] = connection.execute(
+                sa.select(clinicians.c.name).where(clinicians.c.id == case["reviewed_by"])).scalar()
+    return case
+
+
+def review_culture(clinician_id: int, culture_number: str, decision: str, notes: str,
+                   url: str | None = None) -> bool:
+    """Record the clinician's review of a resulted culture. False if it isn't theirs to review."""
+    if decision not in REVIEW_DECISIONS:
+        raise ValueError(f"Unknown review decision: {decision}")
+    with engine(url).begin() as connection:
+        cases = _cases(connection, clinician_id, culture_number)
+        if not cases or cases[0]["organism"] is None:      # not their patient, or no result yet
+            return False
+        connection.execute(cultures.update().where(cultures.c.id == cases[0]["id"]).values(
+            review_decision=decision, review_notes=notes.strip(), reviewed_by=clinician_id,
+            reviewed_at=datetime.datetime.now()))
+    return True
+
+
+def culture_status(case: dict) -> str:
+    """Where a culture is in the workflow: Pending, Resistance mismatch, Ready for review, Reviewed."""
+    if case["organism"] is None:
+        return "Pending"
+    if case["review_decision"]:
+        return "Reviewed"
+    return "Resistance mismatch" if prescription_result(case) == "Resistant" else "Ready for review"
+
+
+def prescription_result(case: dict) -> str | None:
+    """The lab's result for the drug the patient is on, or None if it wasn't tested or isn't back."""
+    course = case.get("prescription")
+    return case["susceptibilities"].get(course["drug"]) if course else None
