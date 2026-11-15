@@ -1,0 +1,9 @@
+# Databricks Apps configuration.
+# Add a SQL warehouse to the app as a resource with the key "sql-warehouse" (the default key),
+# and give the app's service principal access to the model and tables (see README.md).
+command: ["streamlit", "run", "app.py"]
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: TARGET_SUCCESS
+    value: "0.90"

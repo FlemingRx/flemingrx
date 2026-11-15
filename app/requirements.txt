@@ -1,0 +1,12 @@
+# scikit-learn must be the version the registered model was trained with, or the model won't
+# load. To check it: Catalog -> workspace -> armd -> Models -> urine_resistance_model -> Artifacts
+# -> requirements.txt. Change the pin below if a later training run uses a different version.
+streamlit>=1.50
+mlflow
+scikit-learn==1.7.2
+pandas
+numpy
+pyarrow
+databricks-sdk
+databricks-sql-connector
+certifi
